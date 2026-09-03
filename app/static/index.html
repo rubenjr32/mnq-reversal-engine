@@ -6,19 +6,39 @@
   <title>MNQ Reversal Engine</title>
   <style>
     :root { color-scheme: dark; }
-    body { margin:0; font-family: Inter, system-ui, Arial, sans-serif; background:#0b0f14; color:#e8eef6; }
-    .wrap { max-width:1000px; margin:0 auto; padding:24px; }
-    .top { display:flex; justify-content:space-between; align-items:center; gap:16px; }
-    .badge { padding:8px 12px; border-radius:999px; background:#1b2430; font-weight:700; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,system-ui,Arial,sans-serif; background:#0b0f14; color:#e8eef6; }
+    .wrap { max-width:1180px; margin:0 auto; padding:24px; }
+    .top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+    .badge { padding:8px 12px; border-radius:999px; background:#1b2430; font-weight:800; }
     .hero { margin-top:18px; padding:22px; border:1px solid #263241; border-radius:18px; background:#111821; }
-    .state { font-size:48px; font-weight:900; letter-spacing:1px; }
+    .heroRow { display:flex; justify-content:space-between; gap:16px; align-items:flex-end; flex-wrap:wrap; }
+    .state { font-size:52px; line-height:1; font-weight:950; letter-spacing:1px; margin-top:8px; }
+    .substate { font-size:18px; font-weight:800; margin-top:10px; }
     .muted { color:#91a0b3; }
+    .fresh { padding:6px 10px; border-radius:999px; background:#1b2430; font-size:12px; font-weight:800; }
+    .green { color:#55d98d; }
+    .red { color:#ff7272; }
+    .orange { color:#f4ba58; }
+    .gray { color:#a6b1c0; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:16px; }
-    .card { padding:16px; background:#111821; border:1px solid #263241; border-radius:14px; }
-    table { width:100%; border-collapse:collapse; margin-top:22px; overflow:hidden; border-radius:14px; }
-    th, td { padding:12px; border-bottom:1px solid #263241; text-align:left; font-size:14px; }
-    th { color:#91a0b3; font-weight:600; }
-    code { color:#c7d4e5; }
+    .card { padding:15px; background:#111821; border:1px solid #263241; border-radius:14px; min-height:88px; }
+    .label { color:#91a0b3; font-size:13px; margin-bottom:7px; }
+    .value { font-size:21px; font-weight:850; overflow-wrap:anywhere; }
+    .tradegrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:12px; }
+    .tradecard { padding:16px; background:#0f151d; border:1px solid #263241; border-radius:14px; }
+    .tradecard .value { font-size:24px; }
+    h2 { margin-top:28px; }
+    table { width:100%; border-collapse:collapse; margin-top:14px; background:#0f151d; border:1px solid #263241; }
+    th,td { padding:11px; border-bottom:1px solid #263241; text-align:left; font-size:13px; }
+    th { color:#91a0b3; font-weight:700; }
+    tr:last-child td { border-bottom:0; }
+    code { color:#c7d4e5; font-size:12px; }
+    .notice { margin-top:14px; padding:12px 14px; border:1px solid #263241; border-radius:12px; color:#91a0b3; font-size:13px; }
+    @media (max-width:650px) {
+      .state { font-size:40px; }
+      th:nth-child(6), td:nth-child(6) { display:none; }
+    }
   </style>
 </head>
 <body>
@@ -26,55 +46,145 @@
   <div class="top">
     <div>
       <h1 style="margin:0">MNQ Reversal Engine</h1>
-      <div class="muted">v0.1 — manual execution / signal logging</div>
+      <div class="muted">v0.2 — two-stage confirmation / manual execution</div>
     </div>
-    <div class="badge">1 MNQ MAX</div>
+    <div class="badge">1 MNQ MAX · $35 PLANNED RISK</div>
   </div>
 
   <div class="hero">
-    <div class="muted">CURRENT STATE</div>
-    <div class="state" id="state">WAIT</div>
-    <div class="muted">No automated trading in v0.1. Confirm the chart before every order.</div>
+    <div class="heroRow">
+      <div>
+        <div class="muted">CURRENT DECISION</div>
+        <div class="state gray" id="state">WAIT</div>
+        <div class="substate muted" id="reason">Waiting for a qualified setup.</div>
+      </div>
+      <div class="fresh" id="freshness">NO SIGNAL YET</div>
+    </div>
+    <div class="notice">
+      ENTRY_READY means the engine saw location → sweep → displacement/MSS → fresh FVG → CE retrace/hold,
+      with planned risk ≤ $35 for 1 MNQ and at least 2R room to the structural objective. It is still a manual-review signal, not an automatic order.
+    </div>
   </div>
 
   <div class="grid">
-    <div class="card"><div class="muted">Location</div><b id="location">—</b></div>
-    <div class="card"><div class="muted">Sweep</div><b id="sweep">—</b></div>
-    <div class="card"><div class="muted">MSS / CISD</div><b id="mss">—</b></div>
-    <div class="card"><div class="muted">FVG / CE</div><b id="fvg">—</b></div>
+    <div class="card"><div class="label">Symbol / TF</div><div class="value" id="symbol">—</div></div>
+    <div class="card"><div class="label">Session</div><div class="value" id="session">—</div></div>
+    <div class="card"><div class="label">Location</div><div class="value" id="location">—</div></div>
+    <div class="card"><div class="label">Sweep</div><div class="value" id="sweep">—</div></div>
+    <div class="card"><div class="label">MSS / Displacement</div><div class="value" id="mss">—</div></div>
+    <div class="card"><div class="label">FVG / CE</div><div class="value" id="fvg">—</div></div>
   </div>
 
-  <h2>Recent webhook events</h2>
+  <div class="tradegrid">
+    <div class="tradecard"><div class="label">Entry</div><div class="value" id="entry">—</div></div>
+    <div class="tradecard"><div class="label">Stop</div><div class="value" id="stop">—</div></div>
+    <div class="tradecard"><div class="label">2R Target</div><div class="value" id="target">—</div></div>
+    <div class="tradecard"><div class="label">External Objective</div><div class="value" id="objective">—</div></div>
+    <div class="tradecard"><div class="label">Risk · 1 MNQ</div><div class="value" id="risk">—</div></div>
+    <div class="tradecard"><div class="label">Room to Objective</div><div class="value" id="rr">—</div></div>
+  </div>
+
+  <h2>Recent engine events</h2>
   <table>
-    <thead><tr><th>Time</th><th>Payload</th></tr></thead>
+    <thead>
+      <tr><th>Received</th><th>Event</th><th>Side</th><th>Grade</th><th>Price</th><th>Risk</th><th>Room R:R</th></tr>
+    </thead>
     <tbody id="rows"></tbody>
   </table>
 </div>
 
 <script>
+const txt = (v, fallback='—') => (v === null || v === undefined || v === '') ? fallback : String(v);
+const num = (v, digits=2) => {
+  if (v === null || v === undefined || v === '' || Number.isNaN(Number(v))) return '—';
+  return Number(v).toLocaleString(undefined,{minimumFractionDigits:digits,maximumFractionDigits:digits});
+};
+const price = v => num(v,2);
+
+function stateFrom(p) {
+  const event = (p.event || '').toUpperCase();
+  const side = (p.side || '').toUpperCase();
+  if (event === 'ENTRY_READY' && side === 'LONG') return ['LONG','Entry ready — verify chart, then execute manually.','green'];
+  if (event === 'ENTRY_READY' && side === 'SHORT') return ['SHORT','Entry ready — verify chart, then execute manually.','red'];
+  if (event === 'SETUP_ARMED' && side === 'LONG') return ['WATCH LONG','Confirmation exists; waiting for CE retrace/hold.','orange'];
+  if (event === 'SETUP_ARMED' && side === 'SHORT') return ['WATCH SHORT','Confirmation exists; waiting for CE retrace/hold.','orange'];
+  if (event === 'SKIP_RISK') return ['WAIT','Setup rejected: structural stop exceeds the $35 planned-risk cap.','gray'];
+  if (event === 'SKIP_RR') return ['WAIT','Setup rejected: less than 2R room to the external objective.','gray'];
+  return ['WAIT','Waiting for a qualified setup.','gray'];
+}
+
+function setClass(el, cls) {
+  el.classList.remove('green','red','orange','gray');
+  el.classList.add(cls);
+}
+
+function renderLatest(row) {
+  if (!row || !row.payload || typeof row.payload !== 'object') return;
+  const p = row.payload;
+  const [state,reason,cls] = stateFrom(p);
+  const stateEl = document.getElementById('state');
+  stateEl.textContent = state;
+  setClass(stateEl, cls);
+  document.getElementById('reason').textContent = reason;
+
+  document.getElementById('symbol').textContent = `${txt(p.symbol)} / ${txt(p.timeframe)}`;
+  document.getElementById('session').textContent = txt(p.session);
+  document.getElementById('location').textContent = txt(p.location);
+  document.getElementById('sweep').textContent = p.sweep === true ? 'YES' : p.sweep === false ? 'NO' : '—';
+  document.getElementById('mss').textContent = p.mss === true ? 'YES' : p.mss === false ? 'NO' : '—';
+  document.getElementById('fvg').textContent = p.ce == null ? '—' : `${price(p.fvg_bottom)}–${price(p.fvg_top)} · CE ${price(p.ce)}`;
+
+  document.getElementById('entry').textContent = price(p.price);
+  document.getElementById('stop').textContent = price(p.stop);
+  document.getElementById('target').textContent = price(p.target);
+  document.getElementById('objective').textContent = price(p.objective);
+  document.getElementById('risk').textContent = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)} · ${num(p.risk_points,2)} pts`;
+  document.getElementById('rr').textContent = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
+
+  const received = new Date(row.received_at);
+  const ageMin = Math.max(0, (Date.now() - received.getTime()) / 60000);
+  const fresh = document.getElementById('freshness');
+  if (ageMin <= 10) {
+    fresh.textContent = `FRESH · ${Math.floor(ageMin)}m AGO`;
+    fresh.style.background = '#153524';
+  } else {
+    fresh.textContent = `STALE · ${Math.floor(ageMin)}m AGO`;
+    fresh.style.background = '#352d1c';
+  }
+}
+
 async function refresh() {
-  const r = await fetch('/api/signals?limit=30');
-  const rows = await r.json();
+  const [signalsRes, latestRes] = await Promise.all([
+    fetch('/api/signals?limit=40', {cache:'no-store'}),
+    fetch('/api/latest', {cache:'no-store'})
+  ]);
+  const rows = await signalsRes.json();
+  const latest = await latestRes.json();
+
+  if (latest) renderLatest(latest);
+
   const body = document.getElementById('rows');
   body.innerHTML = '';
   rows.forEach(x => {
+    const p = x.payload || {};
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${x.received_at || ''}</td><td><code>${escapeHtml(JSON.stringify(x.payload))}</code></td>`;
+    const received = x.received_at ? new Date(x.received_at).toLocaleString() : '';
+    const risk = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)}`;
+    const rr = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
+    tr.innerHTML = `
+      <td>${received}</td>
+      <td>${txt(p.event, p.source === 'manual-test' ? 'TEST' : '—')}</td>
+      <td>${txt(p.side)}</td>
+      <td>${txt(p.grade)}</td>
+      <td>${price(p.price)}</td>
+      <td>${risk}</td>
+      <td>${rr}</td>`;
     body.appendChild(tr);
   });
+}
 
-  if (rows.length) {
-    const p = rows[0].payload || {};
-    const text = typeof p === 'string' ? p : JSON.stringify(p);
-    const up = text.toUpperCase();
-    document.getElementById('state').textContent = up.includes('LONG') ? 'LONG' : up.includes('SHORT') ? 'SHORT' : 'WAIT';
-  }
-}
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
-}
-refresh();
-setInterval(refresh, 5000);
+refresh().catch(console.error);
+setInterval(() => refresh().catch(console.error), 3000);
 </script>
 </body>
 </html>
