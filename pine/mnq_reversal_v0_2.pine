@@ -1,0 +1,339 @@
+//@version=6
+indicator("MNQ Reversal-Expansion v0.2", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=300)
+
+// -------------------- Inputs --------------------
+htf             = input.timeframe("15", "Context timeframe")
+swingLen        = input.int(3, "Swing length", minval=1, maxval=10)
+dispATR         = input.float(1.0, "Displacement body >= ATR x", minval=0.2, step=0.1)
+minRR           = input.float(2.0, "Minimum room-to-objective R:R", minval=1.0, step=0.25)
+maxRiskDollars  = input.float(35.0, "Max planned risk (1 MNQ, $)", minval=5.0, step=5.0)
+setupLifeBars   = input.int(12, "Setup life after confirmation (bars)", minval=3, maxval=30)
+showFVG         = input.bool(true, "Show FVGs")
+showPD          = input.bool(true, "Show range premium/discount")
+showPDH         = input.bool(true, "Show previous day H/L")
+showLabels      = input.bool(true, "Show setup labels")
+
+// -------------------- Helpers --------------------
+fmt(float x) =>
+    na(x) ? "null" : str.tostring(x, format.mintick)
+
+fmt2(float x) =>
+    na(x) ? "null" : str.tostring(x, "#.##")
+
+yn(bool x) =>
+    x ? "true" : "false"
+
+nearestAbove(float a, float b, float p) =>
+    aa = not na(a) and a > p ? a : na
+    bb = not na(b) and b > p ? b : na
+    na(aa) ? bb : na(bb) ? aa : math.min(aa, bb)
+
+nearestBelow(float a, float b, float p) =>
+    aa = not na(a) and a < p ? a : na
+    bb = not na(b) and b < p ? b : na
+    na(aa) ? bb : na(bb) ? aa : math.max(aa, bb)
+
+// -------------------- Basic measurements --------------------
+atr = ta.atr(14)
+body = math.abs(close - open)
+bullDisp = close > open and body >= atr * dispATR
+bearDisp = close < open and body >= atr * dispATR
+
+// New York session label. These are context labels, not proof of edge.
+nyHour = hour(time, "America/New_York")
+activeAM = nyHour >= 10 and nyHour < 11
+activePM = nyHour >= 14 and nyHour < 15
+activeWindow = activeAM or activePM
+sessionLabel = activeAM ? "NY_AM" : activePM ? "NY_PM" : "OFF_WINDOW"
+
+// Prior day high / low
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+plot(showPDH ? pdh : na, "PDH", color=color.new(color.red, 15), linewidth=1, style=plot.style_linebr)
+plot(showPDH ? pdl : na, "PDL", color=color.new(color.green, 15), linewidth=1, style=plot.style_linebr)
+
+// Context dealing range
+htfHigh = request.security(syminfo.tickerid, htf, ta.highest(high, 20))
+htfLow  = request.security(syminfo.tickerid, htf, ta.lowest(low, 20))
+eq      = (htfHigh + htfLow) / 2.0
+
+plot(showPD ? htfHigh : na, "HTF Range High", color=color.new(color.red, 70), style=plot.style_linebr)
+plot(showPD ? eq      : na, "HTF EQ", color=color.new(color.gray, 50), style=plot.style_linebr)
+plot(showPD ? htfLow  : na, "HTF Range Low", color=color.new(color.green, 70), style=plot.style_linebr)
+
+inPremium = close > eq
+inDiscount = close < eq
+locationText = inPremium ? "PREMIUM" : "DISCOUNT"
+
+// -------------------- Swing structure --------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+bullSweep = not na(lastSwingLow)  and low < lastSwingLow  and close > lastSwingLow
+
+var int lastBullSweepBar = na
+var int lastBearSweepBar = na
+var float lastBullSweepLow = na
+var float lastBearSweepHigh = na
+
+if bullSweep
+    lastBullSweepBar := bar_index
+    lastBullSweepLow := low
+
+if bearSweep
+    lastBearSweepBar := bar_index
+    lastBearSweepHigh := high
+
+bullSweepRecent = not na(lastBullSweepBar) and bar_index - lastBullSweepBar <= 12
+bearSweepRecent = not na(lastBearSweepBar) and bar_index - lastBearSweepBar <= 12
+
+// Market-structure shift approximation: displacement through opposite confirmed swing.
+bearMSS = not na(lastSwingLow) and bearDisp and close < lastSwingLow
+bullMSS = not na(lastSwingHigh) and bullDisp and close > lastSwingHigh
+
+// -------------------- Fair value gaps --------------------
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var float lastBullFvgTop = na
+var float lastBullFvgBottom = na
+var int lastBullFvgBar = na
+var bool bullFvgActive = false
+
+var float lastBearFvgTop = na
+var float lastBearFvgBottom = na
+var int lastBearFvgBar = na
+var bool bearFvgActive = false
+
+if bullFVG
+    lastBullFvgTop := low
+    lastBullFvgBottom := high[2]
+    lastBullFvgBar := bar_index
+    bullFvgActive := true
+    if showFVG
+        box.new(bar_index - 2, lastBullFvgTop, bar_index + 20, lastBullFvgBottom,
+          border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 91))
+
+if bearFVG
+    lastBearFvgTop := low[2]
+    lastBearFvgBottom := high
+    lastBearFvgBar := bar_index
+    bearFvgActive := true
+    if showFVG
+        box.new(bar_index - 2, lastBearFvgTop, bar_index + 20, lastBearFvgBottom,
+          border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 91))
+
+// Full gap traversal invalidates the currently tracked FVG.
+if bullFvgActive and not na(lastBullFvgBottom) and low <= lastBullFvgBottom
+    bullFvgActive := false
+
+if bearFvgActive and not na(lastBearFvgTop) and high >= lastBearFvgTop
+    bearFvgActive := false
+
+bullCE = bullFvgActive ? (lastBullFvgTop + lastBullFvgBottom) / 2.0 : na
+bearCE = bearFvgActive ? (lastBearFvgTop + lastBearFvgBottom) / 2.0 : na
+
+plot(showFVG ? bullCE : na, "Bull FVG CE", color=color.new(color.green, 35), style=plot.style_circles)
+plot(showFVG ? bearCE : na, "Bear FVG CE", color=color.new(color.red, 35), style=plot.style_circles)
+
+// -------------------- Two-stage setup state --------------------
+// Stage 1: location + recent sweep + displacement/MSS.
+// Stage 2: wait for a retrace to the fresh FVG CE and a close back through CE.
+
+freshBullFvg = bullFvgActive and not na(lastBullFvgBar) and bar_index - lastBullFvgBar <= 1
+freshBearFvg = bearFvgActive and not na(lastBearFvgBar) and bar_index - lastBearFvgBar <= 1
+
+longArmEvent = inDiscount and bullSweepRecent and bullMSS and freshBullFvg
+shortArmEvent = inPremium and bearSweepRecent and bearMSS and freshBearFvg
+
+var bool longArmed = false
+var bool shortArmed = false
+var int longArmedBar = na
+var int shortArmedBar = na
+var float longSetupStop = na
+var float shortSetupStop = na
+var float longSetupFvgTop = na
+var float longSetupFvgBottom = na
+var float longSetupCE = na
+var float shortSetupFvgTop = na
+var float shortSetupFvgBottom = na
+var float shortSetupCE = na
+
+if longArmEvent
+    longArmed := true
+    shortArmed := false
+    longArmedBar := bar_index
+    longSetupStop := lastBullSweepLow
+    longSetupFvgTop := lastBullFvgTop
+    longSetupFvgBottom := lastBullFvgBottom
+    longSetupCE := bullCE
+
+if shortArmEvent
+    shortArmed := true
+    longArmed := false
+    shortArmedBar := bar_index
+    shortSetupStop := lastBearSweepHigh
+    shortSetupFvgTop := lastBearFvgTop
+    shortSetupFvgBottom := lastBearFvgBottom
+    shortSetupCE := bearCE
+
+// Expire or invalidate armed setups.
+if longArmed and (bar_index - longArmedBar > setupLifeBars or low <= longSetupStop or low <= longSetupFvgBottom)
+    longArmed := false
+
+if shortArmed and (bar_index - shortArmedBar > setupLifeBars or high >= shortSetupStop or high >= shortSetupFvgTop)
+    shortArmed := false
+
+longRetraceHold = longArmed and bar_index > longArmedBar and low <= longSetupCE and close >= longSetupCE
+shortRetraceHold = shortArmed and bar_index > shortArmedBar and high >= shortSetupCE and close <= shortSetupCE
+
+// Structural objective = nearest relevant external level.
+longObjective = nearestAbove(pdh, htfHigh, close)
+shortObjective = nearestBelow(pdl, htfLow, close)
+
+longRiskPoints = longRetraceHold and not na(longSetupStop) ? close - longSetupStop : na
+shortRiskPoints = shortRetraceHold and not na(shortSetupStop) ? shortSetupStop - close : na
+longRiskUsd = not na(longRiskPoints) ? longRiskPoints * 2.0 : na
+shortRiskUsd = not na(shortRiskPoints) ? shortRiskPoints * 2.0 : na
+
+longRoomRR = not na(longRiskPoints) and longRiskPoints > syminfo.mintick and not na(longObjective) ? (longObjective - close) / longRiskPoints : na
+shortRoomRR = not na(shortRiskPoints) and shortRiskPoints > syminfo.mintick and not na(shortObjective) ? (close - shortObjective) / shortRiskPoints : na
+
+longRiskOk = not na(longRiskUsd) and longRiskUsd > 0 and longRiskUsd <= maxRiskDollars
+shortRiskOk = not na(shortRiskUsd) and shortRiskUsd > 0 and shortRiskUsd <= maxRiskDollars
+longRoomOk = not na(longRoomRR) and longRoomRR >= minRR
+shortRoomOk = not na(shortRoomRR) and shortRoomRR >= minRR
+
+longEntryReady = longRetraceHold and longRiskOk and longRoomOk
+shortEntryReady = shortRetraceHold and shortRiskOk and shortRoomOk
+
+longSkipRisk = longRetraceHold and not longRiskOk
+shortSkipRisk = shortRetraceHold and not shortRiskOk
+longSkipRR = longRetraceHold and longRiskOk and not longRoomOk
+shortSkipRR = shortRetraceHold and shortRiskOk and not shortRoomOk
+
+longTarget = longEntryReady ? close + longRiskPoints * minRR : na
+shortTarget = shortEntryReady ? close - shortRiskPoints * minRR : na
+
+longGrade = activeWindow and not na(longRoomRR) and longRoomRR >= 2.5 ? "A+" : "A"
+shortGrade = activeWindow and not na(shortRoomRR) and shortRoomRR >= 2.5 ? "A+" : "A"
+
+makePayload(string eventName, string side, string grade, float entry, float stop, float target, float objective, float fvgTop, float fvgBottom, float ce, float riskPoints, float riskUsd, float roomRR, bool sweepRecent, bool mssNow) =>
+    s = "{\"event\":\"" + eventName + "\""
+    s := s + ",\"symbol\":\"" + syminfo.ticker + "\""
+    s := s + ",\"side\":\"" + side + "\""
+    s := s + ",\"grade\":\"" + grade + "\""
+    s := s + ",\"timeframe\":\"" + timeframe.period + "\""
+    s := s + ",\"session\":\"" + sessionLabel + "\""
+    s := s + ",\"bar_time_ny\":\"" + str.format_time(time_close, "yyyy-MM-dd HH:mm", "America/New_York") + "\""
+    s := s + ",\"price\":" + fmt(entry)
+    s := s + ",\"location\":\"" + locationText + "\""
+    s := s + ",\"sweep\":" + yn(sweepRecent)
+    s := s + ",\"mss\":" + yn(mssNow)
+    s := s + ",\"fvg_top\":" + fmt(fvgTop)
+    s := s + ",\"fvg_bottom\":" + fmt(fvgBottom)
+    s := s + ",\"ce\":" + fmt(ce)
+    s := s + ",\"stop\":" + fmt(stop)
+    s := s + ",\"target\":" + fmt(target)
+    s := s + ",\"objective\":" + fmt(objective)
+    s := s + ",\"risk_points\":" + fmt2(riskPoints)
+    s := s + ",\"risk_usd_1mnq\":" + fmt2(riskUsd)
+    s := s + ",\"room_rr\":" + fmt2(roomRR)
+    s := s + ",\"active_window\":" + yn(activeWindow)
+    s + "}"
+
+// -------------------- Alerts --------------------
+// Create ONE TradingView alert using "Any alert() function call" and "Once per bar close".
+if barstate.isconfirmed and longArmEvent
+    alert(makePayload("SETUP_ARMED", "LONG", activeWindow ? "A+" : "A", close, longSetupStop, na, nearestAbove(pdh, htfHigh, close), longSetupFvgTop, longSetupFvgBottom, longSetupCE, na, na, na, bullSweepRecent, bullMSS), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and shortArmEvent
+    alert(makePayload("SETUP_ARMED", "SHORT", activeWindow ? "A+" : "A", close, shortSetupStop, na, nearestBelow(pdl, htfLow, close), shortSetupFvgTop, shortSetupFvgBottom, shortSetupCE, na, na, na, bearSweepRecent, bearMSS), alert.freq_once_per_bar_close)
+
+if barstate.isconfirmed and longEntryReady
+    alert(makePayload("ENTRY_READY", "LONG", longGrade, close, longSetupStop, longTarget, longObjective, longSetupFvgTop, longSetupFvgBottom, longSetupCE, longRiskPoints, longRiskUsd, longRoomRR, true, true), alert.freq_once_per_bar_close)
+    longArmed := false
+
+if barstate.isconfirmed and shortEntryReady
+    alert(makePayload("ENTRY_READY", "SHORT", shortGrade, close, shortSetupStop, shortTarget, shortObjective, shortSetupFvgTop, shortSetupFvgBottom, shortSetupCE, shortRiskPoints, shortRiskUsd, shortRoomRR, true, true), alert.freq_once_per_bar_close)
+    shortArmed := false
+
+if barstate.isconfirmed and longSkipRisk
+    alert(makePayload("SKIP_RISK", "LONG", "SKIP", close, longSetupStop, na, longObjective, longSetupFvgTop, longSetupFvgBottom, longSetupCE, longRiskPoints, longRiskUsd, longRoomRR, true, true), alert.freq_once_per_bar_close)
+    longArmed := false
+
+if barstate.isconfirmed and shortSkipRisk
+    alert(makePayload("SKIP_RISK", "SHORT", "SKIP", close, shortSetupStop, na, shortObjective, shortSetupFvgTop, shortSetupFvgBottom, shortSetupCE, shortRiskPoints, shortRiskUsd, shortRoomRR, true, true), alert.freq_once_per_bar_close)
+    shortArmed := false
+
+if barstate.isconfirmed and longSkipRR
+    alert(makePayload("SKIP_RR", "LONG", "SKIP", close, longSetupStop, na, longObjective, longSetupFvgTop, longSetupFvgBottom, longSetupCE, longRiskPoints, longRiskUsd, longRoomRR, true, true), alert.freq_once_per_bar_close)
+    longArmed := false
+
+if barstate.isconfirmed and shortSkipRR
+    alert(makePayload("SKIP_RR", "SHORT", "SKIP", close, shortSetupStop, na, shortObjective, shortSetupFvgTop, shortSetupFvgBottom, shortSetupCE, shortRiskPoints, shortRiskUsd, shortRoomRR, true, true), alert.freq_once_per_bar_close)
+    shortArmed := false
+
+// Keep named conditions for visual/manual use.
+alertcondition(longEntryReady, "MNQ LONG ENTRY READY", "MNQ v0.2 long entry-ready setup")
+alertcondition(shortEntryReady, "MNQ SHORT ENTRY READY", "MNQ v0.2 short entry-ready setup")
+
+// -------------------- Visuals --------------------
+plotshape(bullSweep, title="Bull liquidity sweep", style=shape.circle, location=location.belowbar,
+  color=color.new(color.green, 0), size=size.tiny, text="SWP")
+plotshape(bearSweep, title="Bear liquidity sweep", style=shape.circle, location=location.abovebar,
+  color=color.new(color.red, 0), size=size.tiny, text="SWP")
+
+plotshape(bullMSS, title="Bull MSS", style=shape.triangleup, location=location.belowbar,
+  color=color.new(color.green, 0), size=size.tiny, text="MSS")
+plotshape(bearMSS, title="Bear MSS", style=shape.triangledown, location=location.abovebar,
+  color=color.new(color.red, 0), size=size.tiny, text="MSS")
+
+if showLabels and longArmEvent
+    label.new(bar_index, low, "WATCH LONG\nSweep + MSS → wait CE", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 45))
+
+if showLabels and shortArmEvent
+    label.new(bar_index, high, "WATCH SHORT\nSweep + MSS → wait CE", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 45))
+
+if showLabels and longEntryReady
+    label.new(bar_index, low, "LONG " + longGrade + "\nCE hold | $" + fmt2(longRiskUsd) + " risk", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 10))
+
+if showLabels and shortEntryReady
+    label.new(bar_index, high, "SHORT " + shortGrade + "\nCE hold | $" + fmt2(shortRiskUsd) + " risk", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 10))
+
+// -------------------- Compact chart dashboard --------------------
+var table dash = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 15))
+if barstate.islast
+    state = longEntryReady ? "LONG" : shortEntryReady ? "SHORT" : longArmed ? "WATCH LONG" : shortArmed ? "WATCH SHORT" : "WAIT"
+    stateBg = longEntryReady ? color.new(color.green, 20) : shortEntryReady ? color.new(color.red, 20) : (longArmed or shortArmed) ? color.new(color.orange, 35) : color.new(color.gray, 50)
+
+    table.cell(dash, 0, 0, "MNQ v0.2", text_color=color.white)
+    table.cell(dash, 1, 0, state, text_color=color.white, bgcolor=stateBg)
+    table.cell(dash, 0, 1, "Session")
+    table.cell(dash, 1, 1, sessionLabel)
+    table.cell(dash, 0, 2, "Range")
+    table.cell(dash, 1, 2, locationText)
+    table.cell(dash, 0, 3, "Bull Sweep")
+    table.cell(dash, 1, 3, bullSweepRecent ? "YES" : "NO")
+    table.cell(dash, 0, 4, "Bear Sweep")
+    table.cell(dash, 1, 4, bearSweepRecent ? "YES" : "NO")
+    table.cell(dash, 0, 5, "Bull MSS")
+    table.cell(dash, 1, 5, bullMSS ? "YES" : "NO")
+    table.cell(dash, 0, 6, "Bear MSS")
+    table.cell(dash, 1, 6, bearMSS ? "YES" : "NO")
+    table.cell(dash, 0, 7, "Bull CE")
+    table.cell(dash, 1, 7, na(bullCE) ? "-" : str.tostring(bullCE, format.mintick))
+    table.cell(dash, 0, 8, "Bear CE")
+    table.cell(dash, 1, 8, na(bearCE) ? "-" : str.tostring(bearCE, format.mintick))
+    table.cell(dash, 0, 9, "Max Risk")
+    table.cell(dash, 1, 9, "$" + str.tostring(maxRiskDollars, "#"))
