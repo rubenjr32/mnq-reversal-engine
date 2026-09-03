@@ -1,64 +1,65 @@
-# MNQ Reversal-Expansion Engine v0.1
+# MNQ Reversal-Expansion Engine
 
-First-pass research/execution assistant for MNQ.
+Current build: **v0.2** — manual execution / rich signal logging.
 
-## Philosophy
+## Core sequence
 
-This version intentionally does **not** auto-trade.
-
-Core sequence:
-
-1. Higher-timeframe location (premium/discount)
+1. Higher-timeframe premium / discount location
 2. Liquidity sweep
 3. Displacement / market-structure shift
-4. FVG / consequent encroachment for entry refinement
-5. Structural stop
-6. Real target with >= ~2R room
-7. Manual execution, initially 1 MNQ maximum
+4. Fresh FVG
+5. Retrace to FVG CE and close back through CE
+6. Structural stop from the sweep extreme
+7. At least 2R room to the nearest external objective
+8. Planned risk capped at $35 for 1 MNQ
+9. Manual chart confirmation before any order
 
-The Pine logic is deliberately conservative and incomplete. It is a scanner/assistant, not a proven profitable strategy.
+This is an experimental scanner/decision assistant, **not a proven profitable strategy** and not an auto-trader.
+
+## v0.2 event flow
+
+- `SETUP_ARMED` — location + sweep + MSS + fresh FVG confirmed; wait for retrace.
+- `ENTRY_READY` — CE retrace/hold confirmed and risk/R:R filters pass.
+- `SKIP_RISK` — structural stop would exceed the $35 planned-risk cap for 1 MNQ.
+- `SKIP_RR` — less than 2R room to the structural objective.
 
 ## Files
 
-- `pine/mnq_reversal_v0_1.pine` — TradingView indicator
+- `pine/mnq_reversal_v0_2.pine` — current TradingView indicator
+- `pine/mnq_reversal_v0_1.pine` — original build / rollback copy
 - `app/main.py` — FastAPI webhook receiver
-- `app/static/index.html` — dark dashboard
-- `data/signals.jsonl` — created at runtime
-- `railway.toml` — Railway config
+- `app/static/index.html` — dark decision dashboard
+- `railway.toml` — Railway deployment config
 
-## Current status
+## TradingView alert for v0.2
 
-TradingView -> Railway webhook test confirmed working on 2026-09-03.
+Use **one** alert:
 
-## Local run
+- Condition: `MNQ Reversal-Expansion v0.2`
+- Trigger source: `Any alert() function call`
+- Frequency: once per bar close
+- Webhook: `https://mnq-reversal-engine-production.up.railway.app/webhook/tradingview`
 
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-Open `http://127.0.0.1:8000`.
+The Pine script builds the JSON payload itself, so the TradingView alert message does not need a custom LONG/SHORT JSON template.
 
 ## Railway
 
-1. Push this repo to GitHub.
-2. Create a new Railway project from the repo.
-3. Railway should use `railway.toml`.
-4. Confirm `/health` returns `{"ok":true,...}`.
-5. TradingView webhook endpoint:
+Health endpoint:
 
-`https://mnq-reversal-engine-production.up.railway.app/webhook/tradingview`
+`https://mnq-reversal-engine-production.up.railway.app/health`
 
-## TradingView
+Dashboard:
 
-Paste `pine/mnq_reversal_v0_1.pine` into Pine Editor and add it to an MNQ chart.
+`https://mnq-reversal-engine-production.up.railway.app/`
 
-Create alerts for:
-- `MNQ LONG A`
-- `MNQ SHORT A`
+### Persistence note
 
-For the first day, use TradingView alerts as **notifications only**.
+Railway service files can be ephemeral across redeploys. The backend now supports a `DATA_DIR` environment variable so a Railway Volume can be mounted later and used for durable signal history.
 
-## Important
+## Current risk policy
 
-v0.1 is a research assistant. Do not assume a signal has positive expectancy merely because it is labeled A. The whole point of logging is to discover which components actually matter.
+- 1 MNQ maximum
+- $35 maximum planned risk per setup in the scanner
+- $60 TopstepX personal daily loss limit
+- no pyramiding / averaging down
+- manual execution only
