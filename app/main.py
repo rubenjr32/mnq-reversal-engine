@@ -5,35 +5,31 @@ from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 
-app = FastAPI(title="MNQ Reversal Engine", version="0.1.0")
+app = FastAPI(title="MNQ Reversal Engine", version="0.2.0")
 
 BASE = Path(__file__).resolve().parent.parent
-DATA = BASE / "data"
-DATA.mkdir(exist_ok=True)
+DEFAULT_DATA = BASE / "data"
+DATA = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA)))
+DATA.mkdir(parents=True, exist_ok=True)
 SIGNALS = DATA / "signals.jsonl"
 
 app.mount("/static", StaticFiles(directory=str(BASE / "app" / "static")), name="static")
+
 
 class Signal(BaseModel):
     symbol: str = "MNQ"
     side: str
     grade: str = "A"
+    event: str = "MANUAL"
     price: float | None = None
     stop: float | None = None
     target: float | None = None
     notes: str | None = None
 
-@app.get("/health")
-def health():
-    return {"ok": True, "version": "0.1.0"}
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return (BASE / "app" / "static" / "index.html").read_text(encoding="utf-8")
-
-@app.get("/api/signals")
-def get_signals(limit: int = 50):
+def read_rows(limit: int = 100):
     if not SIGNALS.exists():
         return []
     rows = []
@@ -42,8 +38,48 @@ def get_signals(limit: int = 50):
             try:
                 rows.append(json.loads(line))
             except Exception:
-                pass
-    return rows[-max(1, min(limit, 500)):][::-1]
+                continue
+    return rows[-max(1, min(limit, 1000)):]
+
+
+def append_payload(payload):
+    row = {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "payload": payload,
+    }
+    with SIGNALS.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    return row
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "version": "0.2.0",
+        "storage": str(DATA),
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    return (BASE / "app" / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/signals")
+def get_signals(limit: int = 50):
+    return read_rows(limit)[::-1]
+
+
+@app.get("/api/latest")
+def get_latest():
+    rows = read_rows(500)
+    for row in reversed(rows):
+        payload = row.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("event") not in (None, "TEST"):
+            return row
+    return None
+
 
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(request: Request):
@@ -52,20 +88,9 @@ async def tradingview_webhook(request: Request):
     except Exception:
         payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
 
-    row = {
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "payload": payload,
-    }
-    with SIGNALS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row) + "\n")
-    return {"ok": True}
+    return {"ok": True, "signal": append_payload(payload)}
+
 
 @app.post("/api/manual-signal")
 def manual_signal(signal: Signal):
-    row = {
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "payload": signal.model_dump(),
-    }
-    with SIGNALS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row) + "\n")
-    return {"ok": True, "signal": row}
+    return {"ok": True, "signal": append_payload(signal.model_dump())}
