@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>MNQ Reversal Engine</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: Inter, system-ui, Arial, sans-serif; background:#0b0f14; color:#e8eef6; }
+    .wrap { max-width:1000px; margin:0 auto; padding:24px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .badge { padding:8px 12px; border-radius:999px; background:#1b2430; font-weight:700; }
+    .hero { margin-top:18px; padding:22px; border:1px solid #263241; border-radius:18px; background:#111821; }
+    .state { font-size:48px; font-weight:900; letter-spacing:1px; }
+    .muted { color:#91a0b3; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:16px; }
+    .card { padding:16px; background:#111821; border:1px solid #263241; border-radius:14px; }
+    table { width:100%; border-collapse:collapse; margin-top:22px; overflow:hidden; border-radius:14px; }
+    th, td { padding:12px; border-bottom:1px solid #263241; text-align:left; font-size:14px; }
+    th { color:#91a0b3; font-weight:600; }
+    code { color:#c7d4e5; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1 style="margin:0">MNQ Reversal Engine</h1>
+      <div class="muted">v0.1 — manual execution / signal logging</div>
+    </div>
+    <div class="badge">1 MNQ MAX</div>
+  </div>
+
+  <div class="hero">
+    <div class="muted">CURRENT STATE</div>
+    <div class="state" id="state">WAIT</div>
+    <div class="muted">No automated trading in v0.1. Confirm the chart before every order.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="muted">Location</div><b id="location">—</b></div>
+    <div class="card"><div class="muted">Sweep</div><b id="sweep">—</b></div>
+    <div class="card"><div class="muted">MSS / CISD</div><b id="mss">—</b></div>
+    <div class="card"><div class="muted">FVG / CE</div><b id="fvg">—</b></div>
+  </div>
+
+  <h2>Recent webhook events</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Payload</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<script>
+async function refresh() {
+  const r = await fetch('/api/signals?limit=30');
+  const rows = await r.json();
+  const body = document.getElementById('rows');
+  body.innerHTML = '';
+  rows.forEach(x => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${x.received_at || ''}</td><td><code>${escapeHtml(JSON.stringify(x.payload))}</code></td>`;
+    body.appendChild(tr);
+  });
+
+  if (rows.length) {
+    const p = rows[0].payload || {};
+    const text = typeof p === 'string' ? p : JSON.stringify(p);
+    const up = text.toUpperCase();
+    document.getElementById('state').textContent = up.includes('LONG') ? 'LONG' : up.includes('SHORT') ? 'SHORT' : 'WAIT';
+  }
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
