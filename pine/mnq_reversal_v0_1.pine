@@ -1,0 +1,169 @@
+//@version=6
+indicator("MNQ Reversal-Expansion v0.1", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=300)
+
+// -------------------- Inputs --------------------
+htf        = input.timeframe("15", "Context timeframe")
+swingLen   = input.int(3, "Swing length", minval=1, maxval=10)
+dispATR    = input.float(1.0, "Displacement body >= ATR x", minval=0.2, step=0.1)
+rrMin      = input.float(2.0, "Minimum displayed R:R", minval=1.0, step=0.25)
+showFVG    = input.bool(true, "Show FVGs")
+showPD     = input.bool(true, "Show range premium/discount")
+showPDH    = input.bool(true, "Show previous day H/L")
+showLabels = input.bool(true, "Show setup labels")
+
+// -------------------- Basic measurements --------------------
+atr = ta.atr(14)
+body = math.abs(close - open)
+bullDisp = close > open and body >= atr * dispATR
+bearDisp = close < open and body >= atr * dispATR
+
+// Prior day high / low
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+plot(showPDH ? pdh : na, "PDH", color=color.new(color.red, 15), linewidth=1, style=plot.style_linebr)
+plot(showPDH ? pdl : na, "PDL", color=color.new(color.green, 15), linewidth=1, style=plot.style_linebr)
+
+// Context range from recent HTF swing
+htfHigh = request.security(syminfo.tickerid, htf, ta.highest(high, 20))
+htfLow  = request.security(syminfo.tickerid, htf, ta.lowest(low, 20))
+eq      = (htfHigh + htfLow) / 2.0
+
+plot(showPD ? htfHigh : na, "HTF Range High", color=color.new(color.red, 65), style=plot.style_linebr)
+plot(showPD ? eq      : na, "HTF EQ", color=color.new(color.gray, 45), style=plot.style_linebr)
+plot(showPD ? htfLow  : na, "HTF Range Low", color=color.new(color.green, 65), style=plot.style_linebr)
+
+inPremium = close > eq
+inDiscount = close < eq
+
+// -------------------- Swing structure --------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float prevSwingHigh = na
+var float lastSwingLow = na
+var float prevSwingLow = na
+
+if not na(ph)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := ph
+
+if not na(pl)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pl
+
+// Liquidity sweep ideas: trade through prior swing, then close back inside.
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+bullSweep = not na(lastSwingLow)  and low < lastSwingLow  and close > lastSwingLow
+
+// Approx. market structure shift: displacement through opposite recent swing.
+bearMSS = not na(lastSwingLow) and bearDisp and close < lastSwingLow
+bullMSS = not na(lastSwingHigh) and bullDisp and close > lastSwingHigh
+
+// -------------------- Fair value gaps --------------------
+// Classic 3-candle imbalance approximation.
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var float lastBullFvgTop = na
+var float lastBullFvgBottom = na
+var float lastBearFvgTop = na
+var float lastBearFvgBottom = na
+
+if bullFVG
+    lastBullFvgTop := low
+    lastBullFvgBottom := high[2]
+    if showFVG
+        box.new(bar_index - 2, lastBullFvgTop, bar_index + 20, lastBullFvgBottom,
+          border_color=color.new(color.green, 55), bgcolor=color.new(color.green, 88))
+
+if bearFVG
+    lastBearFvgTop := low[2]
+    lastBearFvgBottom := high
+    if showFVG
+        box.new(bar_index - 2, lastBearFvgTop, bar_index + 20, lastBearFvgBottom,
+          border_color=color.new(color.red, 55), bgcolor=color.new(color.red, 88))
+
+bullCE = not na(lastBullFvgTop) ? (lastBullFvgTop + lastBullFvgBottom) / 2.0 : na
+bearCE = not na(lastBearFvgTop) ? (lastBearFvgTop + lastBearFvgBottom) / 2.0 : na
+
+plot(showFVG ? bullCE : na, "Bull FVG CE", color=color.new(color.green, 35), style=plot.style_circles)
+plot(showFVG ? bearCE : na, "Bear FVG CE", color=color.new(color.red, 35), style=plot.style_circles)
+
+// -------------------- Setup state --------------------
+// We intentionally keep v0.1 conservative:
+// location + sweep + structure/displacement. FVG is bonus confluence, not mandatory.
+var int lastBullSweepBar = na
+var int lastBearSweepBar = na
+
+if bullSweep
+    lastBullSweepBar := bar_index
+if bearSweep
+    lastBearSweepBar := bar_index
+
+bullSweepRecent = not na(lastBullSweepBar) and bar_index - lastBullSweepBar <= 12
+bearSweepRecent = not na(lastBearSweepBar) and bar_index - lastBearSweepBar <= 12
+
+longCore  = inDiscount and bullSweepRecent and bullMSS
+shortCore = inPremium  and bearSweepRecent and bearMSS
+
+// Entry refinement: after confirmation, prefer price near latest FVG CE when one exists.
+longNearCE  = na(bullCE) ? true : math.abs(close - bullCE) <= atr * 0.75
+shortNearCE = na(bearCE) ? true : math.abs(close - bearCE) <= atr * 0.75
+
+longSignal  = longCore and longNearCE
+shortSignal = shortCore and shortNearCE
+
+// Indicative structural stop/target for display only.
+longStop  = lastSwingLow
+shortStop = lastSwingHigh
+longRisk  = not na(longStop) ? close - longStop : na
+shortRisk = not na(shortStop) ? shortStop - close : na
+longTarget  = not na(longRisk)  and longRisk  > syminfo.mintick ? close + longRisk * rrMin : na
+shortTarget = not na(shortRisk) and shortRisk > syminfo.mintick ? close - shortRisk * rrMin : na
+
+// -------------------- Visuals / alerts --------------------
+plotshape(bullSweep, title="Bull liquidity sweep", style=shape.circle, location=location.belowbar,
+  color=color.new(color.green, 0), size=size.tiny, text="SWP")
+plotshape(bearSweep, title="Bear liquidity sweep", style=shape.circle, location=location.abovebar,
+  color=color.new(color.red, 0), size=size.tiny, text="SWP")
+
+plotshape(bullMSS, title="Bull MSS", style=shape.triangleup, location=location.belowbar,
+  color=color.new(color.green, 0), size=size.tiny, text="MSS")
+plotshape(bearMSS, title="Bear MSS", style=shape.triangledown, location=location.abovebar,
+  color=color.new(color.red, 0), size=size.tiny, text="MSS")
+
+if showLabels and longSignal
+    label.new(bar_index, low, "LONG A\nDiscount + Sweep + MSS",
+      style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 15))
+
+if showLabels and shortSignal
+    label.new(bar_index, high, "SHORT A\nPremium + Sweep + MSS",
+      style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 15))
+
+alertcondition(longSignal, "MNQ LONG A", "MNQ Reversal-Expansion LONG A setup")
+alertcondition(shortSignal, "MNQ SHORT A", "MNQ Reversal-Expansion SHORT A setup")
+
+// -------------------- Compact dashboard --------------------
+var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15))
+if barstate.islast
+    state = longSignal ? "LONG" : shortSignal ? "SHORT" : "WAIT"
+    stateBg = longSignal ? color.new(color.green, 25) : shortSignal ? color.new(color.red, 25) : color.new(color.gray, 50)
+
+    table.cell(dash, 0, 0, "MNQ v0.1", text_color=color.white)
+    table.cell(dash, 1, 0, state, text_color=color.white, bgcolor=stateBg)
+    table.cell(dash, 0, 1, "Range")
+    table.cell(dash, 1, 1, inPremium ? "PREMIUM" : "DISCOUNT")
+    table.cell(dash, 0, 2, "Bull Sweep")
+    table.cell(dash, 1, 2, bullSweepRecent ? "YES" : "NO")
+    table.cell(dash, 0, 3, "Bear Sweep")
+    table.cell(dash, 1, 3, bearSweepRecent ? "YES" : "NO")
+    table.cell(dash, 0, 4, "Bull MSS")
+    table.cell(dash, 1, 4, bullMSS ? "YES" : "NO")
+    table.cell(dash, 0, 5, "Bear MSS")
+    table.cell(dash, 1, 5, bearMSS ? "YES" : "NO")
+    table.cell(dash, 0, 6, "Bull CE")
+    table.cell(dash, 1, 6, na(bullCE) ? "-" : str.tostring(bullCE, format.mintick))
+    table.cell(dash, 0, 7, "Bear CE")
+    table.cell(dash, 1, 7, na(bearCE) ? "-" : str.tostring(bearCE, format.mintick))
