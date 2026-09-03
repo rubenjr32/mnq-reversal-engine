@@ -26,6 +26,10 @@ The Pine logic is deliberately conservative and incomplete. It is a scanner/assi
 - `data/signals.jsonl` — created at runtime
 - `railway.toml` — Railway config
 
+## Current status
+
+TradingView -> Railway webhook test confirmed working on 2026-09-03.
+
 ## Local run
 
 ```bash
@@ -41,9 +45,9 @@ Open `http://127.0.0.1:8000`.
 2. Create a new Railway project from the repo.
 3. Railway should use `railway.toml`.
 4. Confirm `/health` returns `{"ok":true,...}`.
-5. Your TradingView webhook endpoint will be:
+5. TradingView webhook endpoint:
 
-`https://YOUR-RAILWAY-DOMAIN/webhook/tradingview`
+`https://mnq-reversal-engine-production.up.railway.app/webhook/tradingview`
 
 ## TradingView
 
@@ -53,7 +57,7 @@ Create alerts for:
 - `MNQ LONG A`
 - `MNQ SHORT A`
 
-For the first day, use TradingView alerts as **notifications only**. We will refine webhook JSON after we see live examples.
+For the first day, use TradingView alerts as **notifications only**.
 
 ## Important
 
