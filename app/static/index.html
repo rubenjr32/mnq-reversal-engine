@@ -3,223 +3,177 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>MNQ Reversal Engine</title>
+  <title>MNQ Opportunity Engine</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing:border-box; }
-    body { margin:0; font-family:Inter,system-ui,Arial,sans-serif; background:#0b0f14; color:#e8eef6; }
-    .wrap { max-width:1180px; margin:0 auto; padding:24px; }
-    .top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
-    .badge { padding:8px 12px; border-radius:999px; background:#1b2430; font-weight:800; }
-    .hero { margin-top:18px; padding:22px; border:1px solid #263241; border-radius:18px; background:#111821; }
-    .heroRow { display:flex; justify-content:space-between; gap:16px; align-items:flex-end; flex-wrap:wrap; }
-    .state { font-size:52px; line-height:1; font-weight:950; letter-spacing:1px; margin-top:8px; }
-    .substate { font-size:18px; font-weight:800; margin-top:10px; }
+    body { margin:0; font-family:Inter,system-ui,Arial,sans-serif; background:#090d12; color:#e8eef6; }
+    .wrap { max-width:1280px; margin:0 auto; padding:22px; }
+    .top { display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+    .badge { padding:8px 12px; border-radius:999px; background:#1a2430; font-weight:850; }
     .muted { color:#91a0b3; }
-    .fresh { padding:6px 10px; border-radius:999px; background:#1b2430; font-size:12px; font-weight:800; }
-    .green { color:#55d98d; }
+    .hero { margin-top:18px; padding:22px; border:1px solid #263241; border-radius:18px; background:#111821; }
+    .heroRow { display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:flex-end; }
+    .state { font-size:52px; line-height:1; font-weight:950; margin-top:8px; }
+    .substate { font-size:18px; font-weight:800; margin-top:10px; }
+    .fresh { padding:6px 10px; border-radius:999px; background:#1b2430; font-size:12px; font-weight:850; }
+    .green { color:#58de92; }
     .red { color:#ff7272; }
-    .orange { color:#f4ba58; }
+    .orange { color:#f2b84f; }
     .gray { color:#a6b1c0; }
+    .cyan { color:#65c8ff; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:16px; }
     .card { padding:15px; background:#111821; border:1px solid #263241; border-radius:14px; min-height:88px; }
-    .label { color:#91a0b3; font-size:13px; margin-bottom:7px; }
+    .label { color:#91a0b3; font-size:12px; margin-bottom:7px; }
     .value { font-size:21px; font-weight:850; overflow-wrap:anywhere; }
+    .playbooks { display:grid; grid-template-columns:repeat(auto-fit,minmax(205px,1fr)); gap:12px; margin-top:12px; }
+    .playbook { padding:15px; background:#0f151d; border:1px solid #263241; border-radius:14px; }
+    .playbook .name { font-size:13px; color:#91a0b3; }
+    .playbook .status { font-size:18px; font-weight:900; margin-top:7px; }
     .tradegrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:12px; }
     .tradecard { padding:16px; background:#0f151d; border:1px solid #263241; border-radius:14px; }
-    .tradecard .value { font-size:24px; }
-    h2 { margin-top:28px; }
-    table { width:100%; border-collapse:collapse; margin-top:14px; background:#0f151d; border:1px solid #263241; }
-    th,td { padding:11px; border-bottom:1px solid #263241; text-align:left; font-size:13px; }
-    th { color:#91a0b3; font-weight:700; }
-    tr:last-child td { border-bottom:0; }
+    .tradecard .value { font-size:23px; }
     .notice { margin-top:14px; padding:12px 14px; border:1px solid #263241; border-radius:12px; color:#91a0b3; font-size:13px; }
-    .testrow { opacity:.55; }
-    @media (max-width:650px) {
-      .state { font-size:40px; }
-      th:nth-child(6), td:nth-child(6) { display:none; }
-    }
+    h2 { margin:28px 0 10px; }
+    table { width:100%; border-collapse:collapse; background:#0f151d; border:1px solid #263241; }
+    th,td { padding:10px; border-bottom:1px solid #263241; text-align:left; font-size:12px; }
+    th { color:#91a0b3; font-weight:750; }
+    tr:last-child td { border-bottom:0; }
+    .testrow { opacity:.5; }
+    @media(max-width:700px){ .state{font-size:40px} th:nth-child(7),td:nth-child(7){display:none} }
   </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <div>
-      <h1 style="margin:0">MNQ Reversal Engine</h1>
-      <div class="muted">v0.2.1 — test-safe live decision / manual execution</div>
+      <h1 style="margin:0">MNQ Opportunity Engine</h1>
+      <div class="muted">v0.3 — regime-aware multi-playbook scanner / manual execution</div>
     </div>
-    <div class="badge">1 MNQ MAX · $35 PLANNED RISK</div>
+    <div class="badge">1 MNQ MAX · $35 PLANNED RISK · $60 DAILY KILL SWITCH</div>
   </div>
 
   <div class="hero">
     <div class="heroRow">
       <div>
-        <div class="muted">CURRENT DECISION</div>
-        <div class="state gray" id="state">WAIT</div>
-        <div class="substate muted" id="reason">Waiting for a qualified setup.</div>
+        <div class="muted">BEST CURRENT DECISION</div>
+        <div class="state gray" id="decision">WAIT</div>
+        <div class="substate muted" id="reason">Waiting for a qualified opportunity.</div>
       </div>
-      <div class="fresh" id="freshness">NO LIVE SIGNAL YET</div>
+      <div class="fresh" id="freshness">NO LIVE ACTION YET</div>
     </div>
-    <div class="notice">
-      ENTRY_READY means the engine saw location → sweep → displacement/MSS → fresh FVG → CE retrace/hold,
-      with planned risk ≤ $35 for 1 MNQ and at least 2R room to the structural objective. Test events can appear in history but can never become the live decision. Signals older than 10 minutes are automatically non-actionable.
-    </div>
+    <div class="notice">v0.3 does not force every market through one reversal pattern. It classifies regime, watches five playbooks, ranks valid opportunities, and only marks ENTRY_READY when the setup also passes the risk and room-to-target checks. Session is a confidence modifier, not a hard gate.</div>
   </div>
 
   <div class="grid">
+    <div class="card"><div class="label">Market Regime</div><div class="value cyan" id="regime">—</div></div>
+    <div class="card"><div class="label">Directional Bias</div><div class="value" id="bias">—</div></div>
     <div class="card"><div class="label">Symbol / TF</div><div class="value" id="symbol">—</div></div>
     <div class="card"><div class="label">Session</div><div class="value" id="session">—</div></div>
-    <div class="card"><div class="label">Location</div><div class="value" id="location">—</div></div>
+    <div class="card"><div class="label">Range Location</div><div class="value" id="location">—</div></div>
+    <div class="card"><div class="label">VWAP</div><div class="value" id="vwap">—</div></div>
+  </div>
+
+  <h2>Playbooks</h2>
+  <div class="playbooks">
+    <div class="playbook"><div class="name">Confirmed Liquidity Reversal</div><div class="status" id="pb-confirmed">IDLE</div></div>
+    <div class="playbook"><div class="name">Early Reversal</div><div class="status" id="pb-early">IDLE</div></div>
+    <div class="playbook"><div class="name">Trend Pullback</div><div class="status" id="pb-trend">IDLE</div></div>
+    <div class="playbook"><div class="name">VWAP Reclaim / Reject</div><div class="status" id="pb-vwap">IDLE</div></div>
+    <div class="playbook"><div class="name">Failed Breakout</div><div class="status" id="pb-failed">IDLE</div></div>
+  </div>
+
+  <h2>Best Opportunity</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Playbook</div><div class="value" id="playbook">—</div></div>
+    <div class="card"><div class="label">Grade / Score</div><div class="value" id="score">—</div></div>
     <div class="card"><div class="label">Sweep</div><div class="value" id="sweep">—</div></div>
     <div class="card"><div class="label">MSS / Displacement</div><div class="value" id="mss">—</div></div>
-    <div class="card"><div class="label">FVG / CE</div><div class="value" id="fvg">—</div></div>
+    <div class="card"><div class="label">Volume Confirm</div><div class="value" id="volume">—</div></div>
+    <div class="card"><div class="label">CE</div><div class="value" id="ce">—</div></div>
   </div>
 
   <div class="tradegrid">
     <div class="tradecard"><div class="label">Entry</div><div class="value" id="entry">—</div></div>
     <div class="tradecard"><div class="label">Stop</div><div class="value" id="stop">—</div></div>
-    <div class="tradecard"><div class="label">2R Target</div><div class="value" id="target">—</div></div>
+    <div class="tradecard"><div class="label">Target</div><div class="value" id="target">—</div></div>
     <div class="tradecard"><div class="label">External Objective</div><div class="value" id="objective">—</div></div>
     <div class="tradecard"><div class="label">Risk · 1 MNQ</div><div class="value" id="risk">—</div></div>
     <div class="tradecard"><div class="label">Room to Objective</div><div class="value" id="rr">—</div></div>
   </div>
 
-  <h2>Recent engine events</h2>
+  <h2>Recent Engine Events</h2>
   <table>
-    <thead>
-      <tr><th>Received</th><th>Event</th><th>Side</th><th>Grade</th><th>Price</th><th>Risk</th><th>Room R:R</th></tr>
-    </thead>
+    <thead><tr><th>Received</th><th>Event</th><th>Playbook</th><th>Side</th><th>Grade</th><th>Score</th><th>Price</th><th>Risk</th><th>Room</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </div>
 
 <script>
-const txt = (v, fallback='—') => (v === null || v === undefined || v === '') ? fallback : String(v);
-const num = (v, digits=2) => {
-  if (v === null || v === undefined || v === '' || Number.isNaN(Number(v))) return '—';
-  return Number(v).toLocaleString(undefined,{minimumFractionDigits:digits,maximumFractionDigits:digits});
-};
-const price = v => num(v,2);
-
-function isTestPayload(p) {
-  if (!p || typeof p !== 'object') return true;
-  const event = String(p.event || '').trim().toUpperCase();
-  const session = String(p.session || '').trim().toUpperCase();
-  const grade = String(p.grade || '').trim().toUpperCase();
-  const side = String(p.side || '').trim().toUpperCase();
-  const source = String(p.source || '').trim().toLowerCase();
-  return event === 'TEST' || session === 'TEST' || grade === 'TEST' || side === 'TEST' || ['manual-test','test','synthetic-test'].includes(source);
+const txt=(v,f='—')=>(v===null||v===undefined||v==='')?f:String(v);
+const num=(v,d=2)=>{ if(v===null||v===undefined||v===''||Number.isNaN(Number(v))) return '—'; return Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}); };
+const price=v=>num(v,2);
+function isTest(p){ if(!p||typeof p!=='object')return true; const vals=[p.event,p.session,p.grade,p.side].map(x=>String(x||'').toUpperCase()); const src=String(p.source||'').toLowerCase(); return vals.includes('TEST')||['manual-test','test','synthetic-test'].includes(src); }
+function ageMinutes(row){ if(!row||!row.received_at)return 999999; return Math.max(0,(Date.now()-new Date(row.received_at).getTime())/60000); }
+function statusClass(v){ const s=String(v||'').toUpperCase(); if(s.includes('READY_LONG')||s==='LONG')return 'green'; if(s.includes('READY_SHORT')||s==='SHORT')return 'red'; if(s.includes('WATCH')||s.includes('ARMED'))return 'orange'; return 'gray'; }
+function paint(id,value){ const el=document.getElementById(id); el.textContent=txt(value); el.classList.remove('green','red','orange','gray'); el.classList.add(statusClass(value)); }
+function resetAction(msg='Waiting for a qualified opportunity.'){
+  const d=document.getElementById('decision'); d.textContent='WAIT'; d.className='state gray'; document.getElementById('reason').textContent=msg; document.getElementById('freshness').textContent='NO FRESH ACTION';
+  ['playbook','score','sweep','mss','volume','ce','entry','stop','target','objective','risk','rr'].forEach(id=>document.getElementById(id).textContent='—');
 }
-
-function stateFrom(p) {
-  const event = (p.event || '').toUpperCase();
-  const side = (p.side || '').toUpperCase();
-  if (event === 'ENTRY_READY' && side === 'LONG') return ['LONG','Entry ready — verify chart, then execute manually.','green'];
-  if (event === 'ENTRY_READY' && side === 'SHORT') return ['SHORT','Entry ready — verify chart, then execute manually.','red'];
-  if (event === 'SETUP_ARMED' && side === 'LONG') return ['WATCH LONG','Confirmation exists; waiting for CE retrace/hold.','orange'];
-  if (event === 'SETUP_ARMED' && side === 'SHORT') return ['WATCH SHORT','Confirmation exists; waiting for CE retrace/hold.','orange'];
-  if (event === 'SKIP_RISK') return ['WAIT','Setup rejected: structural stop exceeds the $35 planned-risk cap.','gray'];
-  if (event === 'SKIP_RR') return ['WAIT','Setup rejected: less than 2R room to the external objective.','gray'];
-  return ['WAIT','Waiting for a qualified setup.','gray'];
+function renderState(row){
+  if(!row||!row.payload||isTest(row.payload))return;
+  const p=row.payload;
+  document.getElementById('regime').textContent=txt(p.regime);
+  document.getElementById('bias').textContent=txt(p.bias);
+  document.getElementById('symbol').textContent=`${txt(p.symbol)} / ${txt(p.timeframe)}`;
+  document.getElementById('session').textContent=txt(p.session);
+  document.getElementById('location').textContent=txt(p.location);
+  document.getElementById('vwap').textContent=price(p.vwap);
+  paint('pb-confirmed',p.confirmed_reversal_status||'IDLE');
+  paint('pb-early',p.early_reversal_status||'IDLE');
+  paint('pb-trend',p.trend_pullback_status||'IDLE');
+  paint('pb-vwap',p.vwap_status||'IDLE');
+  paint('pb-failed',p.failed_breakout_status||'IDLE');
 }
-
-function setClass(el, cls) {
-  el.classList.remove('green','red','orange','gray');
-  el.classList.add(cls);
+function renderAction(row){
+  if(!row||!row.payload||isTest(row.payload)){ resetAction(); return; }
+  const p=row.payload, age=ageMinutes(row), event=String(p.event||'').toUpperCase(), side=String(p.side||'').toUpperCase();
+  const d=document.getElementById('decision');
+  let decision='WAIT', reason='Waiting for a qualified opportunity.', cls='gray';
+  if(age<=10 && event==='ENTRY_READY'){
+    decision=side; cls=side==='LONG'?'green':'red'; reason=`${txt(p.playbook)} · ${txt(p.grade)} ${num(p.score,2)}/10 — verify chart, then execute manually.`;
+  } else if(age<=10 && event==='SETUP_ARMED'){
+    decision=`WATCH ${side}`; cls='orange'; reason=`${txt(p.playbook)} armed — waiting for the actual entry trigger.`;
+  } else if(age>10){ reason='Last actionable event is stale — waiting for a fresh opportunity.'; }
+  d.textContent=decision; d.className=`state ${cls}`; document.getElementById('reason').textContent=reason;
+  document.getElementById('freshness').textContent=age<=10?`FRESH · ${Math.floor(age)}m AGO`:`STALE · ${Math.floor(age)}m AGO`;
+  document.getElementById('playbook').textContent=txt(p.playbook);
+  document.getElementById('score').textContent=p.score==null?'—':`${txt(p.grade)} · ${num(p.score,2)}/10`;
+  document.getElementById('sweep').textContent=p.sweep===true?'YES':p.sweep===false?'NO':'—';
+  document.getElementById('mss').textContent=p.mss===true?'YES':p.mss===false?'NO':'—';
+  document.getElementById('volume').textContent=p.volume_confirm===true?'YES':p.volume_confirm===false?'NO':'—';
+  document.getElementById('ce').textContent=price(p.ce);
+  document.getElementById('entry').textContent=price(p.price);
+  document.getElementById('stop').textContent=price(p.stop);
+  document.getElementById('target').textContent=price(p.target);
+  document.getElementById('objective').textContent=price(p.objective);
+  document.getElementById('risk').textContent=p.risk_usd_1mnq==null?'—':`$${num(p.risk_usd_1mnq,2)} · ${num(p.risk_points,2)} pts`;
+  document.getElementById('rr').textContent=p.room_rr==null?'—':`${num(p.room_rr,2)}R`;
 }
-
-function resetLive(message='Waiting for a qualified setup.') {
-  const stateEl = document.getElementById('state');
-  stateEl.textContent = 'WAIT';
-  setClass(stateEl, 'gray');
-  document.getElementById('reason').textContent = message;
-  document.getElementById('freshness').textContent = 'NO LIVE SIGNAL YET';
-  document.getElementById('freshness').style.background = '#1b2430';
-  ['symbol','session','location','sweep','mss','fvg','entry','stop','target','objective','risk','rr'].forEach(id => {
-    document.getElementById(id).textContent = '—';
-  });
-}
-
-function renderLatest(row) {
-  if (!row || !row.payload || typeof row.payload !== 'object' || isTestPayload(row.payload)) {
-    resetLive();
-    return;
-  }
-
-  const p = row.payload;
-  const received = new Date(row.received_at);
-  const ageMin = Math.max(0, (Date.now() - received.getTime()) / 60000);
-  let [state,reason,cls] = stateFrom(p);
-
-  if (ageMin > 10) {
-    state = 'WAIT';
-    reason = 'Last real signal is stale — waiting for a fresh setup.';
-    cls = 'gray';
-  }
-
-  const stateEl = document.getElementById('state');
-  stateEl.textContent = state;
-  setClass(stateEl, cls);
-  document.getElementById('reason').textContent = reason;
-
-  document.getElementById('symbol').textContent = `${txt(p.symbol)} / ${txt(p.timeframe)}`;
-  document.getElementById('session').textContent = txt(p.session);
-  document.getElementById('location').textContent = txt(p.location);
-  document.getElementById('sweep').textContent = p.sweep === true ? 'YES' : p.sweep === false ? 'NO' : '—';
-  document.getElementById('mss').textContent = p.mss === true ? 'YES' : p.mss === false ? 'NO' : '—';
-  document.getElementById('fvg').textContent = p.ce == null ? '—' : `${price(p.fvg_bottom)}–${price(p.fvg_top)} · CE ${price(p.ce)}`;
-  document.getElementById('entry').textContent = price(p.price);
-  document.getElementById('stop').textContent = price(p.stop);
-  document.getElementById('target').textContent = price(p.target);
-  document.getElementById('objective').textContent = price(p.objective);
-  document.getElementById('risk').textContent = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)} · ${num(p.risk_points,2)} pts`;
-  document.getElementById('rr').textContent = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
-
-  const fresh = document.getElementById('freshness');
-  if (ageMin <= 10) {
-    fresh.textContent = `FRESH · ${Math.floor(ageMin)}m AGO`;
-    fresh.style.background = '#153524';
-  } else {
-    fresh.textContent = `STALE · ${Math.floor(ageMin)}m AGO · NOT ACTIONABLE`;
-    fresh.style.background = '#352d1c';
-  }
-}
-
-async function refresh() {
-  const [signalsRes, latestRes] = await Promise.all([
-    fetch('/api/signals?limit=40', {cache:'no-store'}),
-    fetch('/api/latest', {cache:'no-store'})
-  ]);
-  const rows = await signalsRes.json();
-  const latest = await latestRes.json();
-
-  if (latest) renderLatest(latest); else resetLive();
-
-  const body = document.getElementById('rows');
-  body.innerHTML = '';
-  rows.forEach(x => {
-    const p = x.payload || {};
-    const test = isTestPayload(p);
-    const tr = document.createElement('tr');
-    if (test) tr.classList.add('testrow');
-    const received = x.received_at ? new Date(x.received_at).toLocaleString() : '';
-    const risk = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)}`;
-    const rr = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
-    const eventName = test ? `TEST · ${txt(p.event,'EVENT')}` : txt(p.event);
-    tr.innerHTML = `
-      <td>${received}</td>
-      <td>${eventName}</td>
-      <td>${txt(p.side)}</td>
-      <td>${txt(p.grade)}</td>
-      <td>${price(p.price)}</td>
-      <td>${risk}</td>
-      <td>${rr}</td>`;
+async function refresh(){
+  const [sigR,stateR,actionR]=await Promise.all([fetch('/api/signals?limit=80',{cache:'no-store'}),fetch('/api/latest-state',{cache:'no-store'}),fetch('/api/latest-action',{cache:'no-store'})]);
+  const rows=await sigR.json(), state=await stateR.json(), action=await actionR.json();
+  renderState(state); renderAction(action);
+  const body=document.getElementById('rows'); body.innerHTML='';
+  rows.slice(0,60).forEach(x=>{
+    const p=x.payload||{}, tr=document.createElement('tr'); if(isTest(p))tr.classList.add('testrow');
+    const received=x.received_at?new Date(x.received_at).toLocaleString():'';
+    tr.innerHTML=`<td>${received}</td><td>${isTest(p)?'TEST · ':''}${txt(p.event)}</td><td>${txt(p.playbook)}</td><td>${txt(p.side)}</td><td>${txt(p.grade)}</td><td>${p.score==null?'—':num(p.score,2)}</td><td>${price(p.price)}</td><td>${p.risk_usd_1mnq==null?'—':'$'+num(p.risk_usd_1mnq,2)}</td><td>${p.room_rr==null?'—':num(p.room_rr,2)+'R'}</td>`;
     body.appendChild(tr);
   });
 }
-
-refresh().catch(console.error);
-setInterval(() => refresh().catch(console.error), 3000);
+refresh().catch(console.error); setInterval(()=>refresh().catch(console.error),3000);
 </script>
 </body>
 </html>
