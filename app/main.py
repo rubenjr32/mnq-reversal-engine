@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 
-app = FastAPI(title="MNQ Reversal Engine", version="0.2.0")
+app = FastAPI(title="MNQ Reversal Engine", version="0.2.1")
 
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = BASE / "data"
@@ -52,11 +52,31 @@ def append_payload(payload):
     return row
 
 
+def is_test_payload(payload) -> bool:
+    """Never allow synthetic/manual test events to become the live trade decision."""
+    if not isinstance(payload, dict):
+        return True
+
+    event = str(payload.get("event") or "").strip().upper()
+    session = str(payload.get("session") or "").strip().upper()
+    grade = str(payload.get("grade") or "").strip().upper()
+    source = str(payload.get("source") or "").strip().lower()
+    side = str(payload.get("side") or "").strip().upper()
+
+    return (
+        event == "TEST"
+        or session == "TEST"
+        or grade == "TEST"
+        or side == "TEST"
+        or source in {"manual-test", "test", "synthetic-test"}
+    )
+
+
 @app.get("/health")
 def health():
     return {
         "ok": True,
-        "version": "0.2.0",
+        "version": "0.2.1",
         "storage": str(DATA),
     }
 
@@ -76,7 +96,7 @@ def get_latest():
     rows = read_rows(500)
     for row in reversed(rows):
         payload = row.get("payload") or {}
-        if isinstance(payload, dict) and payload.get("event") not in (None, "TEST"):
+        if not is_test_payload(payload) and payload.get("event"):
             return row
     return None
 
