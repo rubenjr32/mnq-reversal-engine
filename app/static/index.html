@@ -33,8 +33,8 @@
     th,td { padding:11px; border-bottom:1px solid #263241; text-align:left; font-size:13px; }
     th { color:#91a0b3; font-weight:700; }
     tr:last-child td { border-bottom:0; }
-    code { color:#c7d4e5; font-size:12px; }
     .notice { margin-top:14px; padding:12px 14px; border:1px solid #263241; border-radius:12px; color:#91a0b3; font-size:13px; }
+    .testrow { opacity:.55; }
     @media (max-width:650px) {
       .state { font-size:40px; }
       th:nth-child(6), td:nth-child(6) { display:none; }
@@ -46,7 +46,7 @@
   <div class="top">
     <div>
       <h1 style="margin:0">MNQ Reversal Engine</h1>
-      <div class="muted">v0.2 — two-stage confirmation / manual execution</div>
+      <div class="muted">v0.2.1 — test-safe live decision / manual execution</div>
     </div>
     <div class="badge">1 MNQ MAX · $35 PLANNED RISK</div>
   </div>
@@ -58,11 +58,11 @@
         <div class="state gray" id="state">WAIT</div>
         <div class="substate muted" id="reason">Waiting for a qualified setup.</div>
       </div>
-      <div class="fresh" id="freshness">NO SIGNAL YET</div>
+      <div class="fresh" id="freshness">NO LIVE SIGNAL YET</div>
     </div>
     <div class="notice">
       ENTRY_READY means the engine saw location → sweep → displacement/MSS → fresh FVG → CE retrace/hold,
-      with planned risk ≤ $35 for 1 MNQ and at least 2R room to the structural objective. It is still a manual-review signal, not an automatic order.
+      with planned risk ≤ $35 for 1 MNQ and at least 2R room to the structural objective. Test events can appear in history but can never become the live decision. Signals older than 10 minutes are automatically non-actionable.
     </div>
   </div>
 
@@ -101,6 +101,16 @@ const num = (v, digits=2) => {
 };
 const price = v => num(v,2);
 
+function isTestPayload(p) {
+  if (!p || typeof p !== 'object') return true;
+  const event = String(p.event || '').trim().toUpperCase();
+  const session = String(p.session || '').trim().toUpperCase();
+  const grade = String(p.grade || '').trim().toUpperCase();
+  const side = String(p.side || '').trim().toUpperCase();
+  const source = String(p.source || '').trim().toLowerCase();
+  return event === 'TEST' || session === 'TEST' || grade === 'TEST' || side === 'TEST' || ['manual-test','test','synthetic-test'].includes(source);
+}
+
 function stateFrom(p) {
   const event = (p.event || '').toUpperCase();
   const side = (p.side || '').toUpperCase();
@@ -118,10 +128,35 @@ function setClass(el, cls) {
   el.classList.add(cls);
 }
 
+function resetLive(message='Waiting for a qualified setup.') {
+  const stateEl = document.getElementById('state');
+  stateEl.textContent = 'WAIT';
+  setClass(stateEl, 'gray');
+  document.getElementById('reason').textContent = message;
+  document.getElementById('freshness').textContent = 'NO LIVE SIGNAL YET';
+  document.getElementById('freshness').style.background = '#1b2430';
+  ['symbol','session','location','sweep','mss','fvg','entry','stop','target','objective','risk','rr'].forEach(id => {
+    document.getElementById(id).textContent = '—';
+  });
+}
+
 function renderLatest(row) {
-  if (!row || !row.payload || typeof row.payload !== 'object') return;
+  if (!row || !row.payload || typeof row.payload !== 'object' || isTestPayload(row.payload)) {
+    resetLive();
+    return;
+  }
+
   const p = row.payload;
-  const [state,reason,cls] = stateFrom(p);
+  const received = new Date(row.received_at);
+  const ageMin = Math.max(0, (Date.now() - received.getTime()) / 60000);
+  let [state,reason,cls] = stateFrom(p);
+
+  if (ageMin > 10) {
+    state = 'WAIT';
+    reason = 'Last real signal is stale — waiting for a fresh setup.';
+    cls = 'gray';
+  }
+
   const stateEl = document.getElementById('state');
   stateEl.textContent = state;
   setClass(stateEl, cls);
@@ -133,7 +168,6 @@ function renderLatest(row) {
   document.getElementById('sweep').textContent = p.sweep === true ? 'YES' : p.sweep === false ? 'NO' : '—';
   document.getElementById('mss').textContent = p.mss === true ? 'YES' : p.mss === false ? 'NO' : '—';
   document.getElementById('fvg').textContent = p.ce == null ? '—' : `${price(p.fvg_bottom)}–${price(p.fvg_top)} · CE ${price(p.ce)}`;
-
   document.getElementById('entry').textContent = price(p.price);
   document.getElementById('stop').textContent = price(p.stop);
   document.getElementById('target').textContent = price(p.target);
@@ -141,14 +175,12 @@ function renderLatest(row) {
   document.getElementById('risk').textContent = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)} · ${num(p.risk_points,2)} pts`;
   document.getElementById('rr').textContent = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
 
-  const received = new Date(row.received_at);
-  const ageMin = Math.max(0, (Date.now() - received.getTime()) / 60000);
   const fresh = document.getElementById('freshness');
   if (ageMin <= 10) {
     fresh.textContent = `FRESH · ${Math.floor(ageMin)}m AGO`;
     fresh.style.background = '#153524';
   } else {
-    fresh.textContent = `STALE · ${Math.floor(ageMin)}m AGO`;
+    fresh.textContent = `STALE · ${Math.floor(ageMin)}m AGO · NOT ACTIONABLE`;
     fresh.style.background = '#352d1c';
   }
 }
@@ -161,19 +193,22 @@ async function refresh() {
   const rows = await signalsRes.json();
   const latest = await latestRes.json();
 
-  if (latest) renderLatest(latest);
+  if (latest) renderLatest(latest); else resetLive();
 
   const body = document.getElementById('rows');
   body.innerHTML = '';
   rows.forEach(x => {
     const p = x.payload || {};
+    const test = isTestPayload(p);
     const tr = document.createElement('tr');
+    if (test) tr.classList.add('testrow');
     const received = x.received_at ? new Date(x.received_at).toLocaleString() : '';
     const risk = p.risk_usd_1mnq == null ? '—' : `$${num(p.risk_usd_1mnq,2)}`;
     const rr = p.room_rr == null ? '—' : `${num(p.room_rr,2)}R`;
+    const eventName = test ? `TEST · ${txt(p.event,'EVENT')}` : txt(p.event);
     tr.innerHTML = `
       <td>${received}</td>
-      <td>${txt(p.event, p.source === 'manual-test' ? 'TEST' : '—')}</td>
+      <td>${eventName}</td>
       <td>${txt(p.side)}</td>
       <td>${txt(p.grade)}</td>
       <td>${price(p.price)}</td>
