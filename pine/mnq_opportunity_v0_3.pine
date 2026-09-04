@@ -1,0 +1,574 @@
+//@version=6
+indicator("MNQ Opportunity Engine v0.3", overlay=true, max_boxes_count=120, max_lines_count=200, max_labels_count=200)
+
+// ============================================================
+// MNQ Opportunity Engine v0.3
+// Multi-playbook manual-execution assistant.
+// 1) Confirmed liquidity reversal
+// 2) Early reversal
+// 3) Trend pullback / continuation
+// 4) VWAP reclaim / reject
+// 5) Failed breakout / liquidity trap
+// ============================================================
+
+// -------------------- Inputs --------------------
+htf               = input.timeframe("15", "Context timeframe")
+swingLen          = input.int(3, "Swing length", minval=1, maxval=10)
+dispATR           = input.float(0.85, "Displacement body >= ATR x", minval=0.2, step=0.05)
+maxRiskDollars    = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+minScore          = input.float(7.0, "Minimum score to emit ENTRY_READY", minval=5.0, maxval=10.0, step=0.25)
+confirmedMinRR    = input.float(2.0, "Confirmed reversal minimum R:R", minval=1.0, step=0.25)
+earlyMinRR        = input.float(1.5, "Early reversal minimum R:R", minval=1.0, step=0.25)
+trendMinRR        = input.float(1.75, "Trend pullback minimum R:R", minval=1.0, step=0.25)
+vwapMinRR         = input.float(1.75, "VWAP setup minimum R:R", minval=1.0, step=0.25)
+failedBreakMinRR  = input.float(2.0, "Failed breakout minimum R:R", minval=1.0, step=0.25)
+setupLifeBars     = input.int(12, "Confirmed reversal setup life (bars)", minval=3, maxval=30)
+showFVG           = input.bool(true, "Show latest FVGs")
+showLevels        = input.bool(true, "Show context levels")
+showSignals       = input.bool(true, "Show entry labels")
+
+// -------------------- Helpers --------------------
+fmt(float x) =>
+    na(x) ? "null" : str.tostring(x, format.mintick)
+
+fmt2(float x) =>
+    na(x) ? "null" : str.tostring(x, "#.##")
+
+yn(bool x) =>
+    x ? "true" : "false"
+
+gradeFor(float score) =>
+    score >= 9.0 ? "A+" : score >= 7.0 ? "A" : "B"
+
+nearestAbove4(float a, float b, float c, float d, float p) =>
+    float r = na
+    if not na(a) and a > p
+        r := a
+    if not na(b) and b > p
+        r := na(r) ? b : math.min(r, b)
+    if not na(c) and c > p
+        r := na(r) ? c : math.min(r, c)
+    if not na(d) and d > p
+        r := na(r) ? d : math.min(r, d)
+    r
+
+nearestBelow4(float a, float b, float c, float d, float p) =>
+    float r = na
+    if not na(a) and a < p
+        r := a
+    if not na(b) and b < p
+        r := na(r) ? b : math.max(r, b)
+    if not na(c) and c < p
+        r := na(r) ? c : math.max(r, c)
+    if not na(d) and d < p
+        r := na(r) ? d : math.max(r, d)
+    r
+
+// -------------------- Core measurements --------------------
+atr = ta.atr(14)
+body = math.abs(close - open)
+volMA = ta.sma(volume, 20)
+volumeConfirm = volume > volMA
+bullDisp = close > open and body >= atr * dispATR
+bearDisp = close < open and body >= atr * dispATR
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+vwap = ta.vwap(hlc3)
+
+// NY timing is a confidence modifier, never a hard permission gate.
+nyHour = hour(time, "America/New_York")
+activeAM = nyHour >= 10 and nyHour < 11
+activePM = nyHour >= 14 and nyHour < 15
+activeWindow = activeAM or activePM
+sessionLabel = activeAM ? "NY_AM" : activePM ? "NY_PM" : "OFF_WINDOW"
+
+// -------------------- Context levels --------------------
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+htfHigh = request.security(syminfo.tickerid, htf, ta.highest(high, 20))
+htfLow = request.security(syminfo.tickerid, htf, ta.lowest(low, 20))
+eq = (htfHigh + htfLow) / 2.0
+inPremium = close > eq
+inDiscount = close < eq
+locationText = inPremium ? "PREMIUM" : "DISCOUNT"
+
+// Opening range: 09:30–10:00 New York.
+newDay = ta.change(time("D")) != 0
+inOR = not na(time(timeframe.period, "0930-1000", "America/New_York"))
+var float orHigh = na
+var float orLow = na
+if newDay
+    orHigh := na
+    orLow := na
+if inOR
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow := na(orLow) ? low : math.min(orLow, low)
+
+// -------------------- Swing structure --------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+var float lastSwingHigh = na
+var float lastSwingLow = na
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+
+var int lastBullSweepBar = na
+var int lastBearSweepBar = na
+var float lastBullSweepLow = na
+var float lastBearSweepHigh = na
+if bullSweep
+    lastBullSweepBar := bar_index
+    lastBullSweepLow := low
+if bearSweep
+    lastBearSweepBar := bar_index
+    lastBearSweepHigh := high
+
+bullSweepRecent = not na(lastBullSweepBar) and bar_index - lastBullSweepBar <= 8
+bearSweepRecent = not na(lastBearSweepBar) and bar_index - lastBearSweepBar <= 8
+
+bullMSS = not na(lastSwingHigh) and bullDisp and close > lastSwingHigh
+bearMSS = not na(lastSwingLow) and bearDisp and close < lastSwingLow
+
+// -------------------- FVG --------------------
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+var float bullFvgTop = na
+var float bullFvgBottom = na
+var int bullFvgBar = na
+var bool bullFvgActive = false
+var float bearFvgTop = na
+var float bearFvgBottom = na
+var int bearFvgBar = na
+var bool bearFvgActive = false
+
+if bullFVG
+    bullFvgTop := low
+    bullFvgBottom := high[2]
+    bullFvgBar := bar_index
+    bullFvgActive := true
+    if showFVG
+        box.new(bar_index - 2, bullFvgTop, bar_index + 16, bullFvgBottom, border_color=color.new(color.green, 68), bgcolor=color.new(color.green, 92))
+
+if bearFVG
+    bearFvgTop := low[2]
+    bearFvgBottom := high
+    bearFvgBar := bar_index
+    bearFvgActive := true
+    if showFVG
+        box.new(bar_index - 2, bearFvgTop, bar_index + 16, bearFvgBottom, border_color=color.new(color.red, 68), bgcolor=color.new(color.red, 92))
+
+if bullFvgActive and low <= bullFvgBottom
+    bullFvgActive := false
+if bearFvgActive and high >= bearFvgTop
+    bearFvgActive := false
+
+bullCE = bullFvgActive ? (bullFvgTop + bullFvgBottom) / 2.0 : na
+bearCE = bearFvgActive ? (bearFvgTop + bearFvgBottom) / 2.0 : na
+
+// -------------------- Regime --------------------
+trendStrength = atr > 0 ? math.abs(ema20 - ema50) / atr : 0.0
+trendUp = ema20 > ema50 and close > vwap and trendStrength >= 0.30
+trendDown = ema20 < ema50 and close < vwap and trendStrength >= 0.30
+extendedUp = close > vwap and close - vwap >= atr * 1.5
+extendedDown = close < vwap and vwap - close >= atr * 1.5
+regimeText = extendedUp ? "EXTENDED_UP" : extendedDown ? "EXTENDED_DOWN" : trendUp ? "TREND_UP" : trendDown ? "TREND_DOWN" : "RANGE"
+biasText = trendUp ? "LONG" : trendDown ? "SHORT" : "NEUTRAL"
+
+// Structural objective. ATR fallback prevents price-discovery trends from being invisible.
+longObjectiveRaw = nearestAbove4(pdh, htfHigh, orHigh, lastSwingHigh, close)
+shortObjectiveRaw = nearestBelow4(pdl, htfLow, orLow, lastSwingLow, close)
+longObjective = na(longObjectiveRaw) ? close + atr * 3.0 : longObjectiveRaw
+shortObjective = na(shortObjectiveRaw) ? close - atr * 3.0 : shortObjectiveRaw
+
+riskUsdLong(float entry, float stop) =>
+    entry > stop ? (entry - stop) * 2.0 : na
+riskUsdShort(float entry, float stop) =>
+    stop > entry ? (stop - entry) * 2.0 : na
+roomLong(float entry, float stop, float objective) =>
+    r = entry - stop
+    r > syminfo.mintick ? (objective - entry) / r : na
+roomShort(float entry, float stop, float objective) =>
+    r = stop - entry
+    r > syminfo.mintick ? (entry - objective) / r : na
+
+// ============================================================
+// PLAYBOOK 1: Confirmed liquidity reversal
+// ============================================================
+freshBullFvg = bullFvgActive and not na(bullFvgBar) and bar_index - bullFvgBar <= 1
+freshBearFvg = bearFvgActive and not na(bearFvgBar) and bar_index - bearFvgBar <= 1
+longArmEvent = inDiscount and bullSweepRecent and bullMSS and freshBullFvg
+shortArmEvent = inPremium and bearSweepRecent and bearMSS and freshBearFvg
+
+var bool confLongArmed = false
+var bool confShortArmed = false
+var int confLongBar = na
+var int confShortBar = na
+var float confLongStop = na
+var float confShortStop = na
+var float confLongCE = na
+var float confShortCE = na
+
+if longArmEvent
+    confLongArmed := true
+    confShortArmed := false
+    confLongBar := bar_index
+    confLongStop := lastBullSweepLow - syminfo.mintick * 2
+    confLongCE := bullCE
+if shortArmEvent
+    confShortArmed := true
+    confLongArmed := false
+    confShortBar := bar_index
+    confShortStop := lastBearSweepHigh + syminfo.mintick * 2
+    confShortCE := bearCE
+
+if confLongArmed and (bar_index - confLongBar > setupLifeBars or low <= confLongStop)
+    confLongArmed := false
+if confShortArmed and (bar_index - confShortBar > setupLifeBars or high >= confShortStop)
+    confShortArmed := false
+
+confLongRaw = confLongArmed and bar_index > confLongBar and low <= confLongCE and close >= confLongCE
+confShortRaw = confShortArmed and bar_index > confShortBar and high >= confShortCE and close <= confShortCE
+confLongRiskUsd = confLongRaw ? riskUsdLong(close, confLongStop) : na
+confShortRiskUsd = confShortRaw ? riskUsdShort(close, confShortStop) : na
+confLongRR = confLongRaw ? roomLong(close, confLongStop, longObjective) : na
+confShortRR = confShortRaw ? roomShort(close, confShortStop, shortObjective) : na
+confLongScore = 8.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (not na(confLongRR) and confLongRR >= 2.5 ? 1.0 : 0.0)
+confShortScore = 8.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (not na(confShortRR) and confShortRR >= 2.5 ? 1.0 : 0.0)
+confLongValid = confLongRaw and not na(confLongRiskUsd) and confLongRiskUsd <= maxRiskDollars and not na(confLongRR) and confLongRR >= confirmedMinRR and confLongScore >= minScore
+confShortValid = confShortRaw and not na(confShortRiskUsd) and confShortRiskUsd <= maxRiskDollars and not na(confShortRR) and confShortRR >= confirmedMinRR and confShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 2: Early reversal
+// Faster than full 5m MSS: sweep + 1m/3m impulse or strong 5m reclaim.
+// ============================================================
+microBull1 = request.security(syminfo.tickerid, "1", close > high[1] and close > open and (close - open) >= ta.atr(14) * 0.25)
+microBear1 = request.security(syminfo.tickerid, "1", close < low[1] and close < open and (open - close) >= ta.atr(14) * 0.25)
+microBull3 = request.security(syminfo.tickerid, "3", close > high[1] and close > open and (close - open) >= ta.atr(14) * 0.25)
+microBear3 = request.security(syminfo.tickerid, "3", close < low[1] and close < open and (open - close) >= ta.atr(14) * 0.25)
+fastBullReversal = microBull1 or microBull3 or (close > high[1] and close > open and body >= atr * 0.35)
+fastBearReversal = microBear1 or microBear3 or (close < low[1] and close < open and body >= atr * 0.35)
+
+earlyLongRaw0 = inDiscount and bullSweepRecent and fastBullReversal
+earlyShortRaw0 = inPremium and bearSweepRecent and fastBearReversal
+earlyLongRaw = earlyLongRaw0 and not earlyLongRaw0[1]
+earlyShortRaw = earlyShortRaw0 and not earlyShortRaw0[1]
+earlyLongStop = not na(lastBullSweepLow) ? lastBullSweepLow - syminfo.mintick * 2 : ta.lowest(low, 3) - syminfo.mintick * 2
+earlyShortStop = not na(lastBearSweepHigh) ? lastBearSweepHigh + syminfo.mintick * 2 : ta.highest(high, 3) + syminfo.mintick * 2
+earlyLongRiskUsd = earlyLongRaw ? riskUsdLong(close, earlyLongStop) : na
+earlyShortRiskUsd = earlyShortRaw ? riskUsdShort(close, earlyShortStop) : na
+earlyLongRR = earlyLongRaw ? roomLong(close, earlyLongStop, longObjective) : na
+earlyShortRR = earlyShortRaw ? roomShort(close, earlyShortStop, shortObjective) : na
+earlyLongScore = 6.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + ((microBull1 and microBull3) ? 1.0 : 0.5) + (not na(earlyLongRR) and earlyLongRR >= 2.25 ? 0.75 : 0.0) + (extendedDown ? 0.5 : 0.0)
+earlyShortScore = 6.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + ((microBear1 and microBear3) ? 1.0 : 0.5) + (not na(earlyShortRR) and earlyShortRR >= 2.25 ? 0.75 : 0.0) + (extendedUp ? 0.5 : 0.0)
+earlyLongValid = earlyLongRaw and not na(earlyLongRiskUsd) and earlyLongRiskUsd <= maxRiskDollars and not na(earlyLongRR) and earlyLongRR >= earlyMinRR and earlyLongScore >= minScore
+earlyShortValid = earlyShortRaw and not na(earlyShortRiskUsd) and earlyShortRiskUsd <= maxRiskDollars and not na(earlyShortRR) and earlyShortRR >= earlyMinRR and earlyShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 3: Trend pullback / continuation
+// ============================================================
+trendLongRaw0 = trendUp and low <= ema20 + atr * 0.15 and close > ema20 and close > open and close > vwap and body >= atr * 0.30
+trendShortRaw0 = trendDown and high >= ema20 - atr * 0.15 and close < ema20 and close < open and close < vwap and body >= atr * 0.30
+trendLongRaw = trendLongRaw0 and not trendLongRaw0[1]
+trendShortRaw = trendShortRaw0 and not trendShortRaw0[1]
+trendLongStop = ta.lowest(low, 3) - syminfo.mintick * 2
+trendShortStop = ta.highest(high, 3) + syminfo.mintick * 2
+trendLongRiskUsd = trendLongRaw ? riskUsdLong(close, trendLongStop) : na
+trendShortRiskUsd = trendShortRaw ? riskUsdShort(close, trendShortStop) : na
+trendLongRR = trendLongRaw ? roomLong(close, trendLongStop, longObjective) : na
+trendShortRR = trendShortRaw ? roomShort(close, trendShortStop, shortObjective) : na
+trendLongScore = 6.5 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (trendStrength >= 0.6 ? 0.75 : 0.25) + (not na(trendLongRR) and trendLongRR >= 2.5 ? 0.75 : 0.0)
+trendShortScore = 6.5 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (trendStrength >= 0.6 ? 0.75 : 0.25) + (not na(trendShortRR) and trendShortRR >= 2.5 ? 0.75 : 0.0)
+trendLongValid = trendLongRaw and not na(trendLongRiskUsd) and trendLongRiskUsd <= maxRiskDollars and not na(trendLongRR) and trendLongRR >= trendMinRR and trendLongScore >= minScore
+trendShortValid = trendShortRaw and not na(trendShortRiskUsd) and trendShortRiskUsd <= maxRiskDollars and not na(trendShortRR) and trendShortRR >= trendMinRR and trendShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 4: VWAP reclaim / reject
+// ============================================================
+vwapLongRaw0 = close[1] < vwap[1] and low <= vwap and close > vwap and close > open and body >= atr * 0.40
+vwapShortRaw0 = close[1] > vwap[1] and high >= vwap and close < vwap and close < open and body >= atr * 0.40
+vwapLongRaw = vwapLongRaw0 and not vwapLongRaw0[1]
+vwapShortRaw = vwapShortRaw0 and not vwapShortRaw0[1]
+vwapLongStop = ta.lowest(low, 3) - syminfo.mintick * 2
+vwapShortStop = ta.highest(high, 3) + syminfo.mintick * 2
+vwapLongRiskUsd = vwapLongRaw ? riskUsdLong(close, vwapLongStop) : na
+vwapShortRiskUsd = vwapShortRaw ? riskUsdShort(close, vwapShortStop) : na
+vwapLongRR = vwapLongRaw ? roomLong(close, vwapLongStop, longObjective) : na
+vwapShortRR = vwapShortRaw ? roomShort(close, vwapShortStop, shortObjective) : na
+vwapLongScore = 6.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (ema20 > ema50 ? 0.75 : 0.0) + (inDiscount ? 0.5 : 0.0) + (not na(vwapLongRR) and vwapLongRR >= 2.25 ? 0.75 : 0.0)
+vwapShortScore = 6.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (ema20 < ema50 ? 0.75 : 0.0) + (inPremium ? 0.5 : 0.0) + (not na(vwapShortRR) and vwapShortRR >= 2.25 ? 0.75 : 0.0)
+vwapLongValid = vwapLongRaw and not na(vwapLongRiskUsd) and vwapLongRiskUsd <= maxRiskDollars and not na(vwapLongRR) and vwapLongRR >= vwapMinRR and vwapLongScore >= minScore
+vwapShortValid = vwapShortRaw and not na(vwapShortRiskUsd) and vwapShortRiskUsd <= maxRiskDollars and not na(vwapShortRR) and vwapShortRR >= vwapMinRR and vwapShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 5: Failed breakout / liquidity trap
+// ============================================================
+failedLongLevelPD = not na(pdl) and low < pdl and close > pdl
+failedLongLevelOR = not na(orLow) and not inOR and low < orLow and close > orLow
+failedShortLevelPD = not na(pdh) and high > pdh and close < pdh
+failedShortLevelOR = not na(orHigh) and not inOR and high > orHigh and close < orHigh
+failedLongRaw0 = (failedLongLevelPD or failedLongLevelOR) and close > open
+failedShortRaw0 = (failedShortLevelPD or failedShortLevelOR) and close < open
+failedLongRaw = failedLongRaw0 and not failedLongRaw0[1]
+failedShortRaw = failedShortRaw0 and not failedShortRaw0[1]
+failedLongStop = low - syminfo.mintick * 2
+failedShortStop = high + syminfo.mintick * 2
+failedLongRiskUsd = failedLongRaw ? riskUsdLong(close, failedLongStop) : na
+failedShortRiskUsd = failedShortRaw ? riskUsdShort(close, failedShortStop) : na
+failedLongRR = failedLongRaw ? roomLong(close, failedLongStop, longObjective) : na
+failedShortRR = failedShortRaw ? roomShort(close, failedShortStop, shortObjective) : na
+failedLongScore = 7.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (inDiscount ? 0.5 : 0.0) + (not na(failedLongRR) and failedLongRR >= 2.5 ? 0.5 : 0.0)
+failedShortScore = 7.0 + (activeWindow ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (inPremium ? 0.5 : 0.0) + (not na(failedShortRR) and failedShortRR >= 2.5 ? 0.5 : 0.0)
+failedLongValid = failedLongRaw and not na(failedLongRiskUsd) and failedLongRiskUsd <= maxRiskDollars and not na(failedLongRR) and failedLongRR >= failedBreakMinRR and failedLongScore >= minScore
+failedShortValid = failedShortRaw and not na(failedShortRiskUsd) and failedShortRiskUsd <= maxRiskDollars and not na(failedShortRR) and failedShortRR >= failedBreakMinRR and failedShortScore >= minScore
+
+// -------------------- Playbook statuses --------------------
+confStatus = confLongArmed ? "ARMED_LONG" : confShortArmed ? "ARMED_SHORT" : bullSweepRecent ? "WATCH_LONG" : bearSweepRecent ? "WATCH_SHORT" : "IDLE"
+earlyStatus = earlyLongValid ? "READY_LONG" : earlyShortValid ? "READY_SHORT" : (bullSweepRecent and inDiscount) ? "WATCH_LONG" : (bearSweepRecent and inPremium) ? "WATCH_SHORT" : "IDLE"
+trendStatus = trendLongValid ? "READY_LONG" : trendShortValid ? "READY_SHORT" : trendUp ? "WATCH_LONG" : trendDown ? "WATCH_SHORT" : "IDLE"
+vwapNear = math.abs(close - vwap) <= atr * 0.50
+vwapStatus = vwapLongValid ? "READY_LONG" : vwapShortValid ? "READY_SHORT" : vwapNear ? "WATCH" : "IDLE"
+nearExternal = (not na(pdh) and math.abs(close - pdh) <= atr * 0.6) or (not na(pdl) and math.abs(close - pdl) <= atr * 0.6) or (not na(orHigh) and math.abs(close - orHigh) <= atr * 0.6) or (not na(orLow) and math.abs(close - orLow) <= atr * 0.6)
+failedStatus = failedLongValid ? "READY_LONG" : failedShortValid ? "READY_SHORT" : nearExternal ? "WATCH" : "IDLE"
+
+// -------------------- Select the strongest valid opportunity --------------------
+float bestScore = -1.0
+string bestSide = "NONE"
+string bestPlaybook = "NONE"
+float bestEntry = na
+float bestStop = na
+float bestTarget = na
+float bestObjective = na
+float bestRiskUsd = na
+float bestRiskPoints = na
+float bestRR = na
+float bestCE = na
+
+if confLongValid and confLongScore > bestScore
+    bestScore := confLongScore
+    bestSide := "LONG"
+    bestPlaybook := "LIQUIDITY_REVERSAL_CONFIRMED"
+    bestEntry := close
+    bestStop := confLongStop
+    bestObjective := longObjective
+    bestRiskPoints := close - confLongStop
+    bestRiskUsd := confLongRiskUsd
+    bestRR := confLongRR
+    bestTarget := close + bestRiskPoints * confirmedMinRR
+    bestCE := confLongCE
+if confShortValid and confShortScore > bestScore
+    bestScore := confShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "LIQUIDITY_REVERSAL_CONFIRMED"
+    bestEntry := close
+    bestStop := confShortStop
+    bestObjective := shortObjective
+    bestRiskPoints := confShortStop - close
+    bestRiskUsd := confShortRiskUsd
+    bestRR := confShortRR
+    bestTarget := close - bestRiskPoints * confirmedMinRR
+    bestCE := confShortCE
+if earlyLongValid and earlyLongScore > bestScore
+    bestScore := earlyLongScore
+    bestSide := "LONG"
+    bestPlaybook := "EARLY_REVERSAL"
+    bestEntry := close
+    bestStop := earlyLongStop
+    bestObjective := longObjective
+    bestRiskPoints := close - earlyLongStop
+    bestRiskUsd := earlyLongRiskUsd
+    bestRR := earlyLongRR
+    bestTarget := close + bestRiskPoints * earlyMinRR
+    bestCE := na
+if earlyShortValid and earlyShortScore > bestScore
+    bestScore := earlyShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "EARLY_REVERSAL"
+    bestEntry := close
+    bestStop := earlyShortStop
+    bestObjective := shortObjective
+    bestRiskPoints := earlyShortStop - close
+    bestRiskUsd := earlyShortRiskUsd
+    bestRR := earlyShortRR
+    bestTarget := close - bestRiskPoints * earlyMinRR
+    bestCE := na
+if trendLongValid and trendLongScore > bestScore
+    bestScore := trendLongScore
+    bestSide := "LONG"
+    bestPlaybook := "TREND_PULLBACK"
+    bestEntry := close
+    bestStop := trendLongStop
+    bestObjective := longObjective
+    bestRiskPoints := close - trendLongStop
+    bestRiskUsd := trendLongRiskUsd
+    bestRR := trendLongRR
+    bestTarget := close + bestRiskPoints * trendMinRR
+    bestCE := na
+if trendShortValid and trendShortScore > bestScore
+    bestScore := trendShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "TREND_PULLBACK"
+    bestEntry := close
+    bestStop := trendShortStop
+    bestObjective := shortObjective
+    bestRiskPoints := trendShortStop - close
+    bestRiskUsd := trendShortRiskUsd
+    bestRR := trendShortRR
+    bestTarget := close - bestRiskPoints * trendMinRR
+    bestCE := na
+if vwapLongValid and vwapLongScore > bestScore
+    bestScore := vwapLongScore
+    bestSide := "LONG"
+    bestPlaybook := "VWAP_RECLAIM"
+    bestEntry := close
+    bestStop := vwapLongStop
+    bestObjective := longObjective
+    bestRiskPoints := close - vwapLongStop
+    bestRiskUsd := vwapLongRiskUsd
+    bestRR := vwapLongRR
+    bestTarget := close + bestRiskPoints * vwapMinRR
+    bestCE := na
+if vwapShortValid and vwapShortScore > bestScore
+    bestScore := vwapShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "VWAP_REJECT"
+    bestEntry := close
+    bestStop := vwapShortStop
+    bestObjective := shortObjective
+    bestRiskPoints := vwapShortStop - close
+    bestRiskUsd := vwapShortRiskUsd
+    bestRR := vwapShortRR
+    bestTarget := close - bestRiskPoints * vwapMinRR
+    bestCE := na
+if failedLongValid and failedLongScore > bestScore
+    bestScore := failedLongScore
+    bestSide := "LONG"
+    bestPlaybook := "FAILED_BREAKOUT"
+    bestEntry := close
+    bestStop := failedLongStop
+    bestObjective := longObjective
+    bestRiskPoints := close - failedLongStop
+    bestRiskUsd := failedLongRiskUsd
+    bestRR := failedLongRR
+    bestTarget := close + bestRiskPoints * failedBreakMinRR
+    bestCE := na
+if failedShortValid and failedShortScore > bestScore
+    bestScore := failedShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "FAILED_BREAKOUT"
+    bestEntry := close
+    bestStop := failedShortStop
+    bestObjective := shortObjective
+    bestRiskPoints := failedShortStop - close
+    bestRiskUsd := failedShortRiskUsd
+    bestRR := failedShortRR
+    bestTarget := close - bestRiskPoints * failedBreakMinRR
+    bestCE := na
+
+entryReady = bestScore >= minScore and bestSide != "NONE"
+
+// Reset confirmed setup after its CE test, whether accepted or rejected.
+if confLongRaw
+    confLongArmed := false
+if confShortRaw
+    confShortArmed := false
+
+// -------------------- Payload --------------------
+makePayload(string eventName, string side, string playbook, string grade, float score, float entry, float stop, float target, float objective, float riskPts, float riskUsd, float rr, float ce) =>
+    sideSweep = side == "LONG" ? bullSweepRecent : side == "SHORT" ? bearSweepRecent : false
+    sideMSS = side == "LONG" ? bullMSS : side == "SHORT" ? bearMSS : false
+    s = "{\"event\":\"" + eventName + "\""
+    s := s + ",\"symbol\":\"" + syminfo.ticker + "\""
+    s := s + ",\"timeframe\":\"" + timeframe.period + "\""
+    s := s + ",\"bar_time_ny\":\"" + str.format_time(time_close, "yyyy-MM-dd HH:mm", "America/New_York") + "\""
+    s := s + ",\"session\":\"" + sessionLabel + "\""
+    s := s + ",\"regime\":\"" + regimeText + "\""
+    s := s + ",\"bias\":\"" + biasText + "\""
+    s := s + ",\"location\":\"" + locationText + "\""
+    s := s + ",\"side\":\"" + side + "\""
+    s := s + ",\"playbook\":\"" + playbook + "\""
+    s := s + ",\"grade\":\"" + grade + "\""
+    s := s + ",\"score\":" + fmt2(score)
+    s := s + ",\"price\":" + fmt(entry)
+    s := s + ",\"stop\":" + fmt(stop)
+    s := s + ",\"target\":" + fmt(target)
+    s := s + ",\"objective\":" + fmt(objective)
+    s := s + ",\"risk_points\":" + fmt2(riskPts)
+    s := s + ",\"risk_usd_1mnq\":" + fmt2(riskUsd)
+    s := s + ",\"room_rr\":" + fmt2(rr)
+    s := s + ",\"sweep\":" + yn(sideSweep)
+    s := s + ",\"mss\":" + yn(sideMSS)
+    s := s + ",\"ce\":" + fmt(ce)
+    s := s + ",\"vwap\":" + fmt(vwap)
+    s := s + ",\"ema20\":" + fmt(ema20)
+    s := s + ",\"ema50\":" + fmt(ema50)
+    s := s + ",\"volume_confirm\":" + yn(volumeConfirm)
+    s := s + ",\"active_window\":" + yn(activeWindow)
+    s := s + ",\"confirmed_reversal_status\":\"" + confStatus + "\""
+    s := s + ",\"early_reversal_status\":\"" + earlyStatus + "\""
+    s := s + ",\"trend_pullback_status\":\"" + trendStatus + "\""
+    s := s + ",\"vwap_status\":\"" + vwapStatus + "\""
+    s := s + ",\"failed_breakout_status\":\"" + failedStatus + "\""
+    s + "}"
+
+// -------------------- Alerts --------------------
+// Create ONE alert: "Any alert() function call", once per bar close.
+if barstate.isconfirmed
+    if entryReady
+        alert(makePayload("ENTRY_READY", bestSide, bestPlaybook, gradeFor(bestScore), bestScore, bestEntry, bestStop, bestTarget, bestObjective, bestRiskPoints, bestRiskUsd, bestRR, bestCE), alert.freq_once_per_bar_close)
+    else if longArmEvent
+        alert(makePayload("SETUP_ARMED", "LONG", "LIQUIDITY_REVERSAL_CONFIRMED", gradeFor(confLongScore), confLongScore, close, confLongStop, na, longObjective, na, na, na, confLongCE), alert.freq_once_per_bar_close)
+    else if shortArmEvent
+        alert(makePayload("SETUP_ARMED", "SHORT", "LIQUIDITY_REVERSAL_CONFIRMED", gradeFor(confShortScore), confShortScore, close, confShortStop, na, shortObjective, na, na, na, confShortCE), alert.freq_once_per_bar_close)
+    else
+        alert(makePayload("STATE", "NONE", "NONE", "", 0.0, close, na, na, na, na, na, na, na), alert.freq_once_per_bar_close)
+
+// -------------------- Visuals --------------------
+plot(showLevels ? pdh : na, "PDH", color=color.new(color.red, 15), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? pdl : na, "PDL", color=color.new(color.green, 15), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? eq : na, "HTF EQ", color=color.new(color.gray, 55), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? vwap : na, "VWAP", color=color.new(color.blue, 20), linewidth=2)
+plot(showLevels ? ema20 : na, "EMA20", color=color.new(color.gray, 35), linewidth=1)
+plot(showLevels ? orHigh : na, "OR High", color=color.new(color.red, 65), style=plot.style_linebr)
+plot(showLevels ? orLow : na, "OR Low", color=color.new(color.green, 65), style=plot.style_linebr)
+plot(showFVG ? bullCE : na, "Bull CE", color=color.new(color.green, 35), style=plot.style_circles)
+plot(showFVG ? bearCE : na, "Bear CE", color=color.new(color.red, 35), style=plot.style_circles)
+
+plotshape(bullSweep, title="Bull Sweep", style=shape.circle, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0), text="SWP")
+plotshape(bearSweep, title="Bear Sweep", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="SWP")
+plotshape(bullMSS, title="Bull MSS", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0), text="MSS")
+plotshape(bearMSS, title="Bear MSS", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="MSS")
+
+if showSignals and barstate.isconfirmed and entryReady
+    labelText = bestSide + " " + gradeFor(bestScore) + "\n" + bestPlaybook + "\nScore " + fmt2(bestScore) + " · Risk $" + fmt2(bestRiskUsd) + " · " + fmt2(bestRR) + "R"
+    if bestSide == "LONG"
+        label.new(bar_index, low, labelText, style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 15))
+    else
+        label.new(bar_index, high, labelText, style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 15))
+
+// Compact chart table.
+var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 15))
+if barstate.islast
+    currentState = entryReady ? bestSide + " " + gradeFor(bestScore) : confLongArmed ? "WATCH LONG" : confShortArmed ? "WATCH SHORT" : "WAIT"
+    table.cell(dash, 0, 0, "MNQ v0.3", text_color=color.white)
+    table.cell(dash, 1, 0, currentState, text_color=color.white)
+    table.cell(dash, 0, 1, "Regime")
+    table.cell(dash, 1, 1, regimeText)
+    table.cell(dash, 0, 2, "Bias")
+    table.cell(dash, 1, 2, biasText)
+    table.cell(dash, 0, 3, "Confirmed Rev")
+    table.cell(dash, 1, 3, confStatus)
+    table.cell(dash, 0, 4, "Early Rev")
+    table.cell(dash, 1, 4, earlyStatus)
+    table.cell(dash, 0, 5, "Trend Pullback")
+    table.cell(dash, 1, 5, trendStatus)
+    table.cell(dash, 0, 6, "VWAP")
+    table.cell(dash, 1, 6, vwapStatus)
+    table.cell(dash, 0, 7, "Failed Break")
+    table.cell(dash, 1, 7, failedStatus)
+    table.cell(dash, 0, 8, "Best Score")
+    table.cell(dash, 1, 8, entryReady ? fmt2(bestScore) : "-")
