@@ -1,0 +1,31 @@
+//@version=6
+indicator("MNQ Outcome Tracker v0.1", overlay=false)
+
+// Webhook-only 1m OHLC heartbeat for the Railway outcome grader.
+// IMPORTANT: create this alert with webhook enabled and app/popup notifications OFF.
+// It does not generate trade recommendations or place orders.
+
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+
+fmt(float x) =>
+    str.tostring(x, format.mintick)
+
+makeBarPayload() =>
+    s = "{\"source\":\"tracker1m\""
+    s := s + ",\"event\":\"BAR\""
+    s := s + ",\"symbol\":\"" + syminfo.ticker + "\""
+    s := s + ",\"timeframe\":\"1\""
+    s := s + ",\"bar_time_ny\":\"" + str.format_time(time_close, "yyyy-MM-dd HH:mm", "America/New_York") + "\""
+    s := s + ",\"open\":" + fmt(open)
+    s := s + ",\"high\":" + fmt(high)
+    s := s + ",\"low\":" + fmt(low)
+    s := s + ",\"close\":" + fmt(close)
+    s + "}"
+
+if barstate.isconfirmed and isOneMinute
+    alert(makeBarPayload(), alert.freq_once_per_bar_close)
+
+var table guard = table.new(position.top_right, 1, 2, border_width=1)
+if barstate.islast
+    table.cell(guard, 0, 0, "MNQ OUTCOME TRACKER", text_color=color.white, bgcolor=color.new(color.black, 20))
+    table.cell(guard, 0, 1, isOneMinute ? "WEBHOOK HEARTBEAT ACTIVE" : "SWITCH CHART TO 1m", text_color=isOneMinute ? color.white : color.yellow, bgcolor=color.new(color.black, 20))
