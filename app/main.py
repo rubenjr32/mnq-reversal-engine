@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 
-app = FastAPI(title="MNQ Opportunity Engine", version="0.3.1")
+app = FastAPI(title="MNQ Opportunity Engine", version="0.4.0")
 
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = BASE / "data"
@@ -78,21 +78,35 @@ def latest_matching(predicate, limit=1000):
     return None
 
 
-def row_age_minutes(row) -> float:
+def row_age_seconds(row) -> float:
     if not row or not row.get("received_at"):
         return float("inf")
     try:
         received = datetime.fromisoformat(str(row["received_at"]).replace("Z", "+00:00"))
         if received.tzinfo is None:
             received = received.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - received.astimezone(timezone.utc)).total_seconds() / 60.0)
+        return max(0.0, (datetime.now(timezone.utc) - received.astimezone(timezone.utc)).total_seconds())
     except Exception:
         return float("inf")
 
 
+def action_ttl_seconds(payload) -> float:
+    """Execution alerts expire fast; 5m context actions may live longer."""
+    try:
+        explicit = float(payload.get("ttl_seconds"))
+        if explicit > 0:
+            return min(explicit, 600.0)
+    except Exception:
+        pass
+    source = str(payload.get("source") or "").strip().lower()
+    if source == "exec1m":
+        return 150.0
+    return 600.0
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.1", "storage": str(DATA)}
+    return {"ok": True, "version": "0.4.0", "storage": str(DATA)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -107,26 +121,31 @@ def get_signals(limit: int = 100):
 
 @app.get("/api/latest-state")
 def get_latest_state():
-    # v0.3 emits a state snapshot every completed chart bar.
-    return latest_matching(lambda p: bool(p.get("event")), 1500)
+    # Only 5m STATE heartbeats drive regime/playbook context cards.
+    # 1m execution alerts must never overwrite the current 5m context.
+    return latest_matching(
+        lambda p: str(p.get("event") or "").upper() == "STATE",
+        1500,
+    )
 
 
 @app.get("/api/latest-action")
 def get_latest_action():
     """Return only a genuinely current action.
 
-    Historical ENTRY_READY / SETUP_ARMED events remain in event history, but once
-    they are older than 10 minutes they must never populate the dashboard's
-    'Best Current Decision' or 'Best Opportunity' cards.
+    v0.4 1m execution alerts carry a short TTL so stale entries disappear quickly.
+    Older events stay in history for research but never remain actionable.
     """
     actionable = {"ENTRY_READY", "SETUP_ARMED", "SKIP_RISK", "SKIP_RR"}
     row = latest_matching(lambda p: str(p.get("event") or "").upper() in actionable, 1500)
-    if row is None or row_age_minutes(row) > 10.0:
+    if row is None:
+        return None
+    payload = row.get("payload") or {}
+    if row_age_seconds(row) > action_ttl_seconds(payload):
         return None
     return row
 
 
-# Backward-compatible alias. This intentionally returns fresh actions, not STATE heartbeats.
 @app.get("/api/latest")
 def get_latest():
     return get_latest_action()
