@@ -1,0 +1,174 @@
+//@version=6
+strategy("MNQ Max-Style ORB Backtest v0.1", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_order_fills=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Research backtest only. Built to mirror the current Max-style ORB overlay as closely as possible.
+// Run on MNQ 1-minute. Uses ES 1-minute / 15-minute data for cross-market confirmation.
+// 1 MNQ = $2 per Nasdaq point. No profit target: exits on stop, ORB re-entry, or structure break.
+
+// ---------- Inputs ----------
+maxRiskDollars = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+requireVolume  = input.bool(true, "Require breakout volume > 20-bar average")
+minBodyAtr     = input.float(0.25, "Minimum breakout body (ATR multiple)", minval=0.0, step=0.05)
+requireES      = input.bool(true, "Require S&P / ES confirmation")
+esSymbol       = input.symbol("CME_MINI:ES1!", "S&P confirmation symbol")
+retestMode     = input.bool(true, "Allow break-and-retest entry")
+structureLen   = input.int(2, "Structure pivot strength", minval=1, maxval=5)
+showMidline    = input.bool(true, "Show ORB midpoint")
+
+startDate = input.time(timestamp("America/New_York", 2026, 1, 1, 0, 0), "Backtest start")
+endDate   = input.time(timestamp("America/New_York", 2026, 12, 31, 23, 59), "Backtest end")
+inDateRange = time >= startDate and time <= endDate
+
+// ---------- Session / ORB ----------
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+inOrb = not na(time(timeframe.period, "0930-0945", "America/New_York"))
+orbStart = inOrb and not inOrb[1]
+orbEnd = not inOrb and inOrb[1]
+
+var float orbHigh = na
+var float orbLow = na
+var bool orbLocked = false
+var bool initialLongBreakSeen = false
+var bool initialShortBreakSeen = false
+var bool longTriggered = false
+var bool shortTriggered = false
+
+if orbStart
+    orbHigh := high
+    orbLow := low
+    orbLocked := false
+    initialLongBreakSeen := false
+    initialShortBreakSeen := false
+    longTriggered := false
+    shortTriggered := false
+else if inOrb
+    orbHigh := math.max(na(orbHigh) ? high : orbHigh, high)
+    orbLow := math.min(na(orbLow) ? low : orbLow, low)
+
+if orbEnd and not na(orbHigh) and not na(orbLow)
+    orbLocked := true
+
+orbMid = (orbHigh + orbLow) / 2.0
+
+// ---------- ES cash-open ORB ----------
+f_es_orb_high() =>
+    isOpenBar = hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30
+    ta.valuewhen(isOpenBar, high, 0)
+
+f_es_orb_low() =>
+    isOpenBar = hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30
+    ta.valuewhen(isOpenBar, low, 0)
+
+esOrbHigh = request.security(esSymbol, "15", f_es_orb_high(), barmerge.gaps_off, barmerge.lookahead_off)
+esOrbLow  = request.security(esSymbol, "15", f_es_orb_low(), barmerge.gaps_off, barmerge.lookahead_off)
+esClose   = request.security(esSymbol, "1", close, barmerge.gaps_off, barmerge.lookahead_off)
+esOpen    = request.security(esSymbol, "1", open, barmerge.gaps_off, barmerge.lookahead_off)
+
+esLongConfirm = not na(esOrbHigh) and esClose > esOrbHigh and esClose >= esOpen
+esShortConfirm = not na(esOrbLow) and esClose < esOrbLow and esClose <= esOpen
+
+// ---------- Breakout quality ----------
+atr = ta.atr(14)
+volMA = ta.sma(volume, 20)
+volOk = volume > volMA
+body = math.abs(close - open)
+strongBull = close > open and body >= atr * minBodyAtr
+strongBear = close < open and body >= atr * minBodyAtr
+
+closeBreakLong = isOneMinute and orbLocked and close > orbHigh and close[1] <= orbHigh
+closeBreakShort = isOneMinute and orbLocked and close < orbLow and close[1] >= orbLow
+
+if closeBreakLong
+    initialLongBreakSeen := true
+if closeBreakShort
+    initialShortBreakSeen := true
+
+longRetest = isOneMinute and orbLocked and retestMode and initialLongBreakSeen and low <= orbHigh and close > orbHigh and close > open
+shortRetest = isOneMinute and orbLocked and retestMode and initialShortBreakSeen and high >= orbLow and close < orbLow and close < open
+
+rawLong = (closeBreakLong or longRetest) and strongBull and (not requireVolume or volOk)
+rawShort = (closeBreakShort or shortRetest) and strongBear and (not requireVolume or volOk)
+
+confirmedLong = rawLong and (not requireES or esLongConfirm)
+confirmedShort = rawShort and (not requireES or esShortConfirm)
+
+// ---------- Risk model ----------
+insideLongStop = orbHigh - syminfo.mintick * 2
+insideShortStop = orbLow + syminfo.mintick * 2
+candleLongStop = low - syminfo.mintick * 2
+candleShortStop = high + syminfo.mintick * 2
+longStopCandidate = math.max(insideLongStop, candleLongStop)
+shortStopCandidate = math.min(insideShortStop, candleShortStop)
+longRiskPts = close - longStopCandidate
+shortRiskPts = shortStopCandidate - close
+longRiskUsd = longRiskPts * 2.0
+shortRiskUsd = shortRiskPts * 2.0
+
+longGo = inDateRange and confirmedLong and not longTriggered and strategy.position_size == 0 and longRiskPts > 0 and longRiskUsd <= maxRiskDollars
+shortGo = inDateRange and confirmedShort and not shortTriggered and strategy.position_size == 0 and shortRiskPts > 0 and shortRiskUsd <= maxRiskDollars
+
+var float activeStop = na
+var float entryPivotLow = na
+var float entryPivotHigh = na
+
+pl = ta.pivotlow(low, structureLen, structureLen)
+ph = ta.pivothigh(high, structureLen, structureLen)
+var float lastPivotLow = na
+var float lastPivotHigh = na
+if not na(pl)
+    lastPivotLow := pl
+if not na(ph)
+    lastPivotHigh := ph
+
+if longGo
+    longTriggered := true
+    activeStop := longStopCandidate
+    entryPivotLow := lastPivotLow
+    entryPivotHigh := na
+    strategy.entry("ORB-L", strategy.long, qty=1)
+
+if shortGo
+    shortTriggered := true
+    activeStop := shortStopCandidate
+    entryPivotHigh := lastPivotHigh
+    entryPivotLow := na
+    strategy.entry("ORB-S", strategy.short, qty=1)
+
+// Hard stop remains fixed at entry.
+if strategy.position_size > 0 and not na(activeStop)
+    strategy.exit("ORB-L-STOP", from_entry="ORB-L", stop=activeStop)
+if strategy.position_size < 0 and not na(activeStop)
+    strategy.exit("ORB-S-STOP", from_entry="ORB-S", stop=activeStop)
+
+// Max-style thesis invalidation: close back into ORB or break meaningful lower-timeframe structure.
+longReentry = strategy.position_size > 0 and close < orbHigh
+shortReentry = strategy.position_size < 0 and close > orbLow
+
+// Use the latest confirmed pivot after entry as structure evolves; if none exists, fall back to pivot known at entry.
+longStructureLevel = not na(lastPivotLow) ? lastPivotLow : entryPivotLow
+shortStructureLevel = not na(lastPivotHigh) ? lastPivotHigh : entryPivotHigh
+longStructureBreak = strategy.position_size > 0 and not na(longStructureLevel) and close < longStructureLevel
+shortStructureBreak = strategy.position_size < 0 and not na(shortStructureLevel) and close > shortStructureLevel
+
+if longReentry or longStructureBreak
+    strategy.close("ORB-L", comment=longReentry ? "ORB_REENTRY" : "STRUCTURE_BREAK")
+if shortReentry or shortStructureBreak
+    strategy.close("ORB-S", comment=shortReentry ? "ORB_REENTRY" : "STRUCTURE_BREAK")
+
+// Flatten any position at 15:55 ET so results are intraday only.
+forceFlat = hour(time, "America/New_York") == 15 and minute(time, "America/New_York") >= 55
+if forceFlat and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeStop := na
+    entryPivotLow := na
+    entryPivotHigh := na
+
+plot(orbHigh, "ORB High", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+plot(orbLow, "ORB Low", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showMidline ? orbMid : na, "ORB Mid", color=color.new(color.gray, 50), linewidth=1, style=plot.style_linebr)
+bgcolor(inOrb ? color.new(color.blue, 90) : na)
+
+plotshape(longGo, title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, size=size.tiny)
+plotshape(shortGo, title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, size=size.tiny)
