@@ -6,8 +6,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 import json
 import os
+import uuid
 
-app = FastAPI(title="MNQ Opportunity Engine", version="0.4.0")
+app = FastAPI(title="MNQ Opportunity Engine", version="0.4.1")
 
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = BASE / "data"
@@ -40,10 +41,13 @@ def read_rows(limit: int = 100):
                 rows.append(json.loads(line))
             except Exception:
                 continue
-    return rows[-max(1, min(limit, 3000)):]
+    return rows[-max(1, min(limit, 5000)):]
 
 
 def append_payload(payload):
+    payload = dict(payload) if isinstance(payload, dict) else {"raw": payload}
+    if str(payload.get("event") or "").upper() == "ENTRY_READY" and not payload.get("signal_id"):
+        payload["signal_id"] = uuid.uuid4().hex[:12]
     row = {
         "received_at": datetime.now(timezone.utc).isoformat(),
         "payload": payload,
@@ -78,20 +82,24 @@ def latest_matching(predicate, limit=1000):
     return None
 
 
+def parse_dt(value):
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def row_age_seconds(row) -> float:
     if not row or not row.get("received_at"):
         return float("inf")
-    try:
-        received = datetime.fromisoformat(str(row["received_at"]).replace("Z", "+00:00"))
-        if received.tzinfo is None:
-            received = received.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - received.astimezone(timezone.utc)).total_seconds())
-    except Exception:
+    received = parse_dt(row["received_at"])
+    if received is None:
         return float("inf")
+    return max(0.0, (datetime.now(timezone.utc) - received.astimezone(timezone.utc)).total_seconds())
 
 
 def action_ttl_seconds(payload) -> float:
-    """Execution alerts expire fast; 5m context actions may live longer."""
     try:
         explicit = float(payload.get("ttl_seconds"))
         if explicit > 0:
@@ -104,9 +112,98 @@ def action_ttl_seconds(payload) -> float:
     return 600.0
 
 
+def to_float(v):
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+def grade_open_signals(bar_row):
+    """Use each completed 1m OHLC heartbeat to grade unresolved ENTRY_READY signals.
+
+    WIN = target touched before stop can be disproven on this bar.
+    LOSS = stop touched before target can be disproven on this bar.
+    AMBIGUOUS = both stop and target touched inside the same 1m bar; ordering is unknowable.
+    EXPIRED = 60 minutes elapsed without either level touching.
+    """
+    bar = bar_row.get("payload") or {}
+    if str(bar.get("event") or "").upper() != "BAR":
+        return []
+    hi, lo = to_float(bar.get("high")), to_float(bar.get("low"))
+    if hi is None or lo is None:
+        return []
+    now = parse_dt(bar_row.get("received_at")) or datetime.now(timezone.utc)
+    rows = read_rows(5000)
+    resolved = {
+        str((r.get("payload") or {}).get("signal_id"))
+        for r in rows
+        if str((r.get("payload") or {}).get("event") or "").upper() == "TRADE_RESULT"
+    }
+    results = []
+    for r in rows:
+        p = r.get("payload") or {}
+        if str(p.get("event") or "").upper() != "ENTRY_READY" or is_test_payload(p):
+            continue
+        sid = str(p.get("signal_id") or "")
+        if not sid or sid in resolved:
+            continue
+        entered = parse_dt(r.get("received_at"))
+        if entered is None or entered >= now:
+            continue
+        side = str(p.get("side") or "").upper()
+        entry, stop, target = to_float(p.get("price")), to_float(p.get("stop")), to_float(p.get("target"))
+        if side not in {"LONG", "SHORT"} or entry is None or stop is None or target is None:
+            continue
+        age_min = (now - entered).total_seconds() / 60.0
+        stop_hit = lo <= stop if side == "LONG" else hi >= stop
+        target_hit = hi >= target if side == "LONG" else lo <= target
+        result = None
+        exit_price = None
+        if stop_hit and target_hit:
+            result = "AMBIGUOUS"
+        elif target_hit:
+            result, exit_price = "WIN", target
+        elif stop_hit:
+            result, exit_price = "LOSS", stop
+        elif age_min >= 60:
+            result, exit_price = "EXPIRED", to_float(bar.get("close"))
+        if result is None:
+            continue
+        risk_usd = abs(entry - stop) * 2.0
+        pnl_usd = None
+        if result == "WIN":
+            pnl_usd = abs(target - entry) * 2.0
+        elif result == "LOSS":
+            pnl_usd = -risk_usd
+        elif result == "EXPIRED" and exit_price is not None:
+            pnl_usd = ((exit_price - entry) if side == "LONG" else (entry - exit_price)) * 2.0
+        out = {
+            "source": "grader1m",
+            "event": "TRADE_RESULT",
+            "signal_id": sid,
+            "symbol": p.get("symbol", bar.get("symbol", "MNQ")),
+            "side": side,
+            "playbook": p.get("playbook", "NONE"),
+            "grade": p.get("grade", ""),
+            "score": p.get("score"),
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "exit_price": exit_price,
+            "result": result,
+            "pnl_usd_1mnq": pnl_usd,
+            "minutes_open": round(age_min, 2),
+            "notes": "Both stop and target touched in same 1m bar; ordering unknown." if result == "AMBIGUOUS" else None,
+        }
+        results.append(append_payload(out))
+        resolved.add(sid)
+    return results
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.4.0", "storage": str(DATA)}
+    return {"ok": True, "version": "0.4.1", "storage": str(DATA)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -119,23 +216,25 @@ def get_signals(limit: int = 100):
     return read_rows(limit)[::-1]
 
 
+@app.get("/api/results")
+def get_results(limit: int = 100):
+    out = []
+    for row in reversed(read_rows(5000)):
+        p = row.get("payload") or {}
+        if str(p.get("event") or "").upper() == "TRADE_RESULT" and not is_test_payload(p):
+            out.append(row)
+            if len(out) >= max(1, min(limit, 500)):
+                break
+    return out
+
+
 @app.get("/api/latest-state")
 def get_latest_state():
-    # Only 5m STATE heartbeats drive regime/playbook context cards.
-    # 1m execution alerts must never overwrite the current 5m context.
-    return latest_matching(
-        lambda p: str(p.get("event") or "").upper() == "STATE",
-        1500,
-    )
+    return latest_matching(lambda p: str(p.get("event") or "").upper() == "STATE", 1500)
 
 
 @app.get("/api/latest-action")
 def get_latest_action():
-    """Return only a genuinely current action.
-
-    v0.4 1m execution alerts carry a short TTL so stale entries disappear quickly.
-    Older events stay in history for research but never remain actionable.
-    """
     actionable = {"ENTRY_READY", "SETUP_ARMED", "SKIP_RISK", "SKIP_RR"}
     row = latest_matching(lambda p: str(p.get("event") or "").upper() in actionable, 1500)
     if row is None:
@@ -157,7 +256,9 @@ async def tradingview_webhook(request: Request):
         payload = await request.json()
     except Exception:
         payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
-    return {"ok": True, "signal": append_payload(payload)}
+    row = append_payload(payload)
+    graded = grade_open_signals(row)
+    return {"ok": True, "signal": row, "graded": graded}
 
 
 @app.post("/api/manual-signal")
