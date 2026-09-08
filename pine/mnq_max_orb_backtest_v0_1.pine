@@ -1,9 +1,8 @@
 //@version=6
 strategy("MNQ Max-Style ORB Backtest v0.1", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_order_fills=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1)
 
-// Research backtest only. Built to mirror the current Max-style ORB overlay as closely as possible.
-// Run on MNQ 1-minute. Uses ES 1-minute / 15-minute data for cross-market confirmation.
-// 1 MNQ = $2 per Nasdaq point. No profit target: exits on stop, ORB re-entry, or structure break.
+// Research backtest only. Run on MNQ 1-minute.
+// Uses ES for cross-market confirmation. 1 MNQ = $2 per Nasdaq point.
 
 // ---------- Inputs ----------
 maxRiskDollars = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
@@ -15,8 +14,10 @@ retestMode     = input.bool(true, "Allow break-and-retest entry")
 structureLen   = input.int(2, "Structure pivot strength", minval=1, maxval=5)
 showMidline    = input.bool(true, "Show ORB midpoint")
 
-startDate = input.time(timestamp("America/New_York", 2026, 1, 1, 0, 0), "Backtest start")
-endDate   = input.time(timestamp("America/New_York", 2026, 12, 31, 23, 59), "Backtest end")
+// input.time() requires a compile-time constant for defval.
+// These are 2026-01-01 00:00 ET and 2026-12-31 23:59 ET in Unix milliseconds.
+startDate = input.time(1767243600000, "Backtest start")
+endDate   = input.time(1798779540000, "Backtest end")
 inDateRange = time >= startDate and time <= endDate
 
 // ---------- Session / ORB ----------
@@ -88,7 +89,6 @@ shortRetest = isOneMinute and orbLocked and retestMode and initialShortBreakSeen
 
 rawLong = (closeBreakLong or longRetest) and strongBull and (not requireVolume or volOk)
 rawShort = (closeBreakShort or shortRetest) and strongBear and (not requireVolume or volOk)
-
 confirmedLong = rawLong and (not requireES or esLongConfirm)
 confirmedShort = rawShort and (not requireES or esShortConfirm)
 
@@ -134,17 +134,13 @@ if shortGo
     entryPivotLow := na
     strategy.entry("ORB-S", strategy.short, qty=1)
 
-// Hard stop remains fixed at entry.
 if strategy.position_size > 0 and not na(activeStop)
     strategy.exit("ORB-L-STOP", from_entry="ORB-L", stop=activeStop)
 if strategy.position_size < 0 and not na(activeStop)
     strategy.exit("ORB-S-STOP", from_entry="ORB-S", stop=activeStop)
 
-// Max-style thesis invalidation: close back into ORB or break meaningful lower-timeframe structure.
 longReentry = strategy.position_size > 0 and close < orbHigh
 shortReentry = strategy.position_size < 0 and close > orbLow
-
-// Use the latest confirmed pivot after entry as structure evolves; if none exists, fall back to pivot known at entry.
 longStructureLevel = not na(lastPivotLow) ? lastPivotLow : entryPivotLow
 shortStructureLevel = not na(lastPivotHigh) ? lastPivotHigh : entryPivotHigh
 longStructureBreak = strategy.position_size > 0 and not na(longStructureLevel) and close < longStructureLevel
@@ -155,7 +151,6 @@ if longReentry or longStructureBreak
 if shortReentry or shortStructureBreak
     strategy.close("ORB-S", comment=shortReentry ? "ORB_REENTRY" : "STRUCTURE_BREAK")
 
-// Flatten any position at 15:55 ET so results are intraday only.
 forceFlat = hour(time, "America/New_York") == 15 and minute(time, "America/New_York") >= 55
 if forceFlat and strategy.position_size != 0
     strategy.close_all(comment="EOD")
@@ -169,6 +164,5 @@ plot(orbHigh, "ORB High", color=color.new(color.lime, 0), linewidth=2, style=plo
 plot(orbLow, "ORB Low", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
 plot(showMidline ? orbMid : na, "ORB Mid", color=color.new(color.gray, 50), linewidth=1, style=plot.style_linebr)
 bgcolor(inOrb ? color.new(color.blue, 90) : na)
-
 plotshape(longGo, title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, size=size.tiny)
 plotshape(shortGo, title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, size=size.tiny)
