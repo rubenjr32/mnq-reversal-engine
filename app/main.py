@@ -122,8 +122,8 @@ def to_float(v):
 def grade_open_signals(bar_row):
     """Use each completed 1m OHLC heartbeat to grade unresolved ENTRY_READY signals.
 
-    WIN = target touched before stop can be disproven on this bar.
-    LOSS = stop touched before target can be disproven on this bar.
+    WIN = target touched without the stop also touching on that 1m bar.
+    LOSS = stop touched without the target also touching on that 1m bar.
     AMBIGUOUS = both stop and target touched inside the same 1m bar; ordering is unknowable.
     EXPIRED = 60 minutes elapsed without either level touching.
     """
@@ -213,7 +213,15 @@ def dashboard():
 
 @app.get("/api/signals")
 def get_signals(limit: int = 100):
-    return read_rows(limit)[::-1]
+    visible = []
+    for row in reversed(read_rows(5000)):
+        p = row.get("payload") or {}
+        if str(p.get("event") or "").upper() == "BAR":
+            continue
+        visible.append(row)
+        if len(visible) >= max(1, min(limit, 500)):
+            break
+    return visible
 
 
 @app.get("/api/results")
