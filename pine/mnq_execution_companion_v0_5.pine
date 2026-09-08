@@ -1,0 +1,240 @@
+//@version=6
+indicator("MNQ Execution Companion v0.5", overlay=true, max_labels_count=250, max_lines_count=100)
+
+// Broader 1m execution engine. Manual execution only. 1 MNQ.
+// Adds momentum continuation + failed-signal flip coverage while retaining
+// breakout/retest, failed breakout, trend pullback, VWAP and early reversal logic.
+
+contextTf      = input.timeframe("5", "Primary context timeframe")
+macroTf        = input.timeframe("15", "Macro context timeframe")
+maxRiskDollars = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+minRiskPoints  = input.float(3.0, "Minimum structural stop distance (pts)", minval=1.0, step=0.5)
+minScore       = input.float(7.0, "Minimum execution score", minval=5.0, maxval=10.0, step=0.25)
+showLevels     = input.bool(true, "Show context levels")
+showLabels     = input.bool(true, "Show qualified labels")
+
+fmt(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+fmt2(float x) => na(x) ? "null" : str.tostring(x, "#.##")
+gradeFor(float s) => s >= 9 ? "A+" : s >= 7.75 ? "A" : "B+"
+riskLong(float e, float s) => e > s ? (e-s)*2.0 : na
+riskShort(float e, float s) => s > e ? (s-e)*2.0 : na
+roomLong(float e,float s,float o) => e>s ? (o-e)/(e-s) : na
+roomShort(float e,float s,float o) => s>e ? (e-o)/(s-e) : na
+
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+atr1 = ta.atr(14)
+ema9 = ta.ema(close,9)
+ema20 = ta.ema(close,20)
+volMA = ta.sma(volume,20)
+volOk = volume > volMA
+body = math.abs(close-open)
+strongBull = close>open and body>=atr1*0.35
+strongBear = close<open and body>=atr1*0.35
+
+c5 = request.security(syminfo.tickerid, contextTf, close)
+ema20_5 = request.security(syminfo.tickerid, contextTf, ta.ema(close,20))
+ema50_5 = request.security(syminfo.tickerid, contextTf, ta.ema(close,50))
+vwap5 = request.security(syminfo.tickerid, contextTf, ta.vwap(hlc3))
+atr5 = request.security(syminfo.tickerid, contextTf, ta.atr(14))
+rangeHigh5 = request.security(syminfo.tickerid, contextTf, ta.highest(high[1],4))
+rangeLow5 = request.security(syminfo.tickerid, contextTf, ta.lowest(low[1],4))
+swingHigh5 = request.security(syminfo.tickerid, contextTf, ta.highest(high[1],12))
+swingLow5 = request.security(syminfo.tickerid, contextTf, ta.lowest(low[1],12))
+macroHigh = request.security(syminfo.tickerid, macroTf, ta.highest(high[1],20))
+macroLow = request.security(syminfo.tickerid, macroTf, ta.lowest(low[1],20))
+macroEq = (macroHigh+macroLow)/2.0
+inPremium = close>macroEq
+inDiscount = close<macroEq
+trendStrength5 = atr5>0 ? math.abs(ema20_5-ema50_5)/atr5 : 0.0
+trendUp5 = ema20_5>ema50_5 and c5>vwap5 and trendStrength5>=0.15
+trendDown5 = ema20_5<ema50_5 and c5<vwap5 and trendStrength5>=0.15
+extendedUp5 = c5>vwap5 and c5-vwap5>=atr5*1.2
+extendedDown5 = c5<vwap5 and vwap5-c5>=atr5*1.2
+regime = extendedUp5?"EXTENDED_UP":extendedDown5?"EXTENDED_DOWN":trendUp5?"TREND_UP":trendDown5?"TREND_DOWN":"RANGE"
+bias = trendUp5?"LONG":trendDown5?"SHORT":"NEUTRAL"
+
+longObjective = math.max(swingHigh5, rangeHigh5)
+shortObjective = math.min(swingLow5, rangeLow5)
+if na(longObjective) or longObjective<=close
+    longObjective := close + atr5*2.0
+if na(shortObjective) or shortObjective>=close
+    shortObjective := close - atr5*2.0
+
+// Local pivots / sweeps
+ph = ta.pivothigh(high,2,2)
+pl = ta.pivotlow(low,2,2)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+bearSweep = not na(lastPH) and high>lastPH and close<lastPH
+bullSweep = not na(lastPL) and low<lastPL and close>lastPL
+var int bearSweepBar = na
+var int bullSweepBar = na
+var float bearSweepHigh = na
+var float bullSweepLow = na
+if bearSweep
+    bearSweepBar := bar_index
+    bearSweepHigh := high
+if bullSweep
+    bullSweepBar := bar_index
+    bullSweepLow := low
+bearSweepRecent = not na(bearSweepBar) and bar_index-bearSweepBar<=5
+bullSweepRecent = not na(bullSweepBar) and bar_index-bullSweepBar<=5
+
+// Remember the most recent fired signal so a decisive invalidation can become an opposite setup.
+var string lastSignalSide = "NONE"
+var float lastSignalStop = na
+var int lastSignalBar = na
+
+// 1) Breakout/retest
+breakLong = close>rangeHigh5 and close[1]<=rangeHigh5 and strongBull
+breakShort = close<rangeLow5 and close[1]>=rangeLow5 and strongBear
+retestLong = low<=rangeHigh5+atr1*0.25 and close>=rangeHigh5 and close>open and close>=ema9
+retestShort = high>=rangeLow5-atr1*0.25 and close<=rangeLow5 and close<open and close<=ema9
+var int longBreakBar = na
+var int shortBreakBar = na
+if breakLong
+    longBreakBar := bar_index
+if breakShort
+    shortBreakBar := bar_index
+breakLongRaw = not na(longBreakBar) and bar_index>longBreakBar and bar_index-longBreakBar<=8 and retestLong
+breakShortRaw = not na(shortBreakBar) and bar_index>shortBreakBar and bar_index-shortBreakBar<=8 and retestShort
+
+// 2) Failed breakout / liquidity trap
+failedLongRaw = low<rangeLow5 and close>rangeLow5 and strongBull and not (low[1]<rangeLow5 and close[1]>rangeLow5)
+failedShortRaw = high>rangeHigh5 and close<rangeHigh5 and strongBear and not (high[1]>rangeHigh5 and close[1]<rangeHigh5)
+
+// 3) Trend pullback
+trendLongRaw = trendUp5 and low<=ema20 and close>ema20 and close>high[1] and close>open
+trendShortRaw = trendDown5 and high>=ema20 and close<ema20 and close<low[1] and close<open
+
+// 4) VWAP reclaim/reject
+vwapLongRaw = low<=vwap5 and close>vwap5 and close>high[1] and close>open
+vwapShortRaw = high>=vwap5 and close<vwap5 and close<low[1] and close<open
+
+// 5) Early reversal
+revLongRaw = inDiscount and bullSweepRecent and close>high[1] and strongBull
+revShortRaw = inPremium and bearSweepRecent and close<low[1] and strongBear
+
+// 6) Momentum continuation: catches clean stair-step moves instead of waiting for deep pullbacks.
+hhhlLong = high>high[1] and low>=low[1] and close>ema9 and ema9>ema20
+lhllShort = low<low[1] and high<=high[1] and close<ema9 and ema9<ema20
+momLongRaw = (trendUp5 or close>vwap5) and hhhlLong and strongBull and (volOk or body>=atr1*0.55) and close>high[1]
+momShortRaw = (trendDown5 or close<vwap5) and lhllShort and strongBear and (volOk or body>=atr1*0.55) and close<low[1]
+
+// 7) Failed-signal flip: if a recent signal's stop is reclaimed decisively, use that failure as evidence.
+flipWindow = not na(lastSignalBar) and bar_index-lastSignalBar<=12
+flipLongRaw = flipWindow and lastSignalSide=="SHORT" and not na(lastSignalStop) and close>lastSignalStop and close>high[1] and strongBull and close>ema9
+flipShortRaw = flipWindow and lastSignalSide=="LONG" and not na(lastSignalStop) and close<lastSignalStop and close<low[1] and strongBear and close<ema9
+
+// Candidate helper values
+longStop3 = ta.lowest(low,3)-syminfo.mintick*2
+shortStop3 = ta.highest(high,3)+syminfo.mintick*2
+longStop4 = ta.lowest(low,4)-syminfo.mintick*2
+shortStop4 = ta.highest(high,4)+syminfo.mintick*2
+
+float bestScore=-1.0
+string bestSide="NONE"
+string bestPlaybook="NONE"
+float bestStop=na
+float bestRiskPts=na
+float bestRiskUsd=na
+float bestRoom=na
+float bestTargetRR=na
+float bestObjective=na
+
+tryLong(bool raw, string pb, float st, float baseScore, float minRR) =>
+    riskPts = raw ? close-st : na
+    riskUsd = raw ? riskLong(close,st) : na
+    room = raw ? roomLong(close,st,longObjective) : na
+    score = baseScore + (trendUp5?0.5:0.0) + (volOk?0.5:0.0) + (room>=2.25?0.5:0.0)
+    valid = raw and riskPts>=minRiskPoints and riskUsd<=maxRiskDollars and room>=minRR and score>=minScore
+    [valid,score,riskPts,riskUsd,room]
+
+tryShort(bool raw, string pb, float st, float baseScore, float minRR) =>
+    riskPts = raw ? st-close : na
+    riskUsd = raw ? riskShort(close,st) : na
+    room = raw ? roomShort(close,st,shortObjective) : na
+    score = baseScore + (trendDown5?0.5:0.0) + (volOk?0.5:0.0) + (room>=2.25?0.5:0.0)
+    valid = raw and riskPts>=minRiskPoints and riskUsd<=maxRiskDollars and room>=minRR and score>=minScore
+    [valid,score,riskPts,riskUsd,room]
+
+// Evaluate candidates. Highest score wins this bar.
+[ok1,s1,rp1,ru1,rr1]=tryLong(breakLongRaw,"BREAKOUT_RETEST",longStop3,7.5,1.75)
+if ok1 and s1>bestScore
+    bestScore:=s1,bestSide:="LONG",bestPlaybook:="BREAKOUT_RETEST",bestStop:=longStop3,bestRiskPts:=rp1,bestRiskUsd:=ru1,bestRoom:=rr1,bestTargetRR:=1.75,bestObjective:=longObjective
+[ok2,s2,rp2,ru2,rr2]=tryShort(breakShortRaw,"BREAKOUT_RETEST",shortStop3,7.5,1.75)
+if ok2 and s2>bestScore
+    bestScore:=s2,bestSide:="SHORT",bestPlaybook:="BREAKOUT_RETEST",bestStop:=shortStop3,bestRiskPts:=rp2,bestRiskUsd:=ru2,bestRoom:=rr2,bestTargetRR:=1.75,bestObjective:=shortObjective
+[ok3,s3,rp3,ru3,rr3]=tryLong(failedLongRaw,"FAILED_BREAKOUT",low-syminfo.mintick*2,7.75,1.75)
+if ok3 and s3>bestScore
+    bestScore:=s3,bestSide:="LONG",bestPlaybook:="FAILED_BREAKOUT",bestStop:=low-syminfo.mintick*2,bestRiskPts:=rp3,bestRiskUsd:=ru3,bestRoom:=rr3,bestTargetRR:=1.75,bestObjective:=longObjective
+[ok4,s4,rp4,ru4,rr4]=tryShort(failedShortRaw,"FAILED_BREAKOUT",high+syminfo.mintick*2,7.75,1.75)
+if ok4 and s4>bestScore
+    bestScore:=s4,bestSide:="SHORT",bestPlaybook:="FAILED_BREAKOUT",bestStop:=high+syminfo.mintick*2,bestRiskPts:=rp4,bestRiskUsd:=ru4,bestRoom:=rr4,bestTargetRR:=1.75,bestObjective:=shortObjective
+[ok5,s5,rp5,ru5,rr5]=tryLong(trendLongRaw,"TREND_PULLBACK",longStop4,7.5,1.5)
+if ok5 and s5>bestScore
+    bestScore:=s5,bestSide:="LONG",bestPlaybook:="TREND_PULLBACK",bestStop:=longStop4,bestRiskPts:=rp5,bestRiskUsd:=ru5,bestRoom:=rr5,bestTargetRR:=1.5,bestObjective:=longObjective
+[ok6,s6,rp6,ru6,rr6]=tryShort(trendShortRaw,"TREND_PULLBACK",shortStop4,7.5,1.5)
+if ok6 and s6>bestScore
+    bestScore:=s6,bestSide:="SHORT",bestPlaybook:="TREND_PULLBACK",bestStop:=shortStop4,bestRiskPts:=rp6,bestRiskUsd:=ru6,bestRoom:=rr6,bestTargetRR:=1.5,bestObjective:=shortObjective
+[ok7,s7,rp7,ru7,rr7]=tryLong(vwapLongRaw,"VWAP_RECLAIM",longStop3,7.5,1.5)
+if ok7 and s7>bestScore
+    bestScore:=s7,bestSide:="LONG",bestPlaybook:="VWAP_RECLAIM",bestStop:=longStop3,bestRiskPts:=rp7,bestRiskUsd:=ru7,bestRoom:=rr7,bestTargetRR:=1.5,bestObjective:=longObjective
+[ok8,s8,rp8,ru8,rr8]=tryShort(vwapShortRaw,"VWAP_REJECT",shortStop3,7.5,1.5)
+if ok8 and s8>bestScore
+    bestScore:=s8,bestSide:="SHORT",bestPlaybook:="VWAP_REJECT",bestStop:=shortStop3,bestRiskPts:=rp8,bestRiskUsd:=ru8,bestRoom:=rr8,bestTargetRR:=1.5,bestObjective:=shortObjective
+[ok9,s9,rp9,ru9,rr9]=tryLong(revLongRaw,"EARLY_REVERSAL",not na(bullSweepLow)?bullSweepLow-syminfo.mintick*2:longStop4,7.25,1.5)
+if ok9 and s9>bestScore
+    bestScore:=s9,bestSide:="LONG",bestPlaybook:="EARLY_REVERSAL",bestStop:=not na(bullSweepLow)?bullSweepLow-syminfo.mintick*2:longStop4,bestRiskPts:=rp9,bestRiskUsd:=ru9,bestRoom:=rr9,bestTargetRR:=1.5,bestObjective:=longObjective
+[ok10,s10,rp10,ru10,rr10]=tryShort(revShortRaw,"EARLY_REVERSAL",not na(bearSweepHigh)?bearSweepHigh+syminfo.mintick*2:shortStop4,7.25,1.5)
+if ok10 and s10>bestScore
+    bestScore:=s10,bestSide:="SHORT",bestPlaybook:="EARLY_REVERSAL",bestStop:=not na(bearSweepHigh)?bearSweepHigh+syminfo.mintick*2:shortStop4,bestRiskPts:=rp10,bestRiskUsd:=ru10,bestRoom:=rr10,bestTargetRR:=1.5,bestObjective:=shortObjective
+[ok11,s11,rp11,ru11,rr11]=tryLong(momLongRaw,"MOMENTUM_CONTINUATION",longStop3,7.25,1.35)
+if ok11 and s11>bestScore
+    bestScore:=s11,bestSide:="LONG",bestPlaybook:="MOMENTUM_CONTINUATION",bestStop:=longStop3,bestRiskPts:=rp11,bestRiskUsd:=ru11,bestRoom:=rr11,bestTargetRR:=1.5,bestObjective:=longObjective
+[ok12,s12,rp12,ru12,rr12]=tryShort(momShortRaw,"MOMENTUM_CONTINUATION",shortStop3,7.25,1.35)
+if ok12 and s12>bestScore
+    bestScore:=s12,bestSide:="SHORT",bestPlaybook:="MOMENTUM_CONTINUATION",bestStop:=shortStop3,bestRiskPts:=rp12,bestRiskUsd:=ru12,bestRoom:=rr12,bestTargetRR:=1.5,bestObjective:=shortObjective
+[ok13,s13,rp13,ru13,rr13]=tryLong(flipLongRaw,"FAILED_SIGNAL_FLIP",longStop3,8.0,1.5)
+if ok13 and s13>bestScore
+    bestScore:=s13,bestSide:="LONG",bestPlaybook:="FAILED_SIGNAL_FLIP",bestStop:=longStop3,bestRiskPts:=rp13,bestRiskUsd:=ru13,bestRoom:=rr13,bestTargetRR:=1.75,bestObjective:=longObjective
+[ok14,s14,rp14,ru14,rr14]=tryShort(flipShortRaw,"FAILED_SIGNAL_FLIP",shortStop3,8.0,1.5)
+if ok14 and s14>bestScore
+    bestScore:=s14,bestSide:="SHORT",bestPlaybook:="FAILED_SIGNAL_FLIP",bestStop:=shortStop3,bestRiskPts:=rp14,bestRiskUsd:=ru14,bestRoom:=rr14,bestTargetRR:=1.75,bestObjective:=shortObjective
+
+entryReady = isOneMinute and bestSide!="NONE"
+bestTarget = bestSide=="LONG" ? close+bestRiskPts*bestTargetRR : bestSide=="SHORT" ? close-bestRiskPts*bestTargetRR : na
+
+makePayload() =>
+    s="{\"source\":\"exec1m\",\"engine_version\":\"0.5\",\"ttl_seconds\":150,\"event\":\"ENTRY_READY\""
+    s:=s+",\"symbol\":\""+syminfo.ticker+"\",\"timeframe\":\"1\""
+    s:=s+",\"side\":\""+bestSide+"\",\"playbook\":\""+bestPlaybook+"\""
+    s:=s+",\"grade\":\""+gradeFor(bestScore)+"\",\"score\":"+fmt2(bestScore)
+    s:=s+",\"regime\":\""+regime+"\",\"bias\":\""+bias+"\""
+    s:=s+",\"price\":"+fmt(close)+",\"stop\":"+fmt(bestStop)+",\"target\":"+fmt(bestTarget)
+    s:=s+",\"objective\":"+fmt(bestObjective)+",\"risk_points\":"+fmt2(bestRiskPts)+",\"risk_usd_1mnq\":"+fmt2(bestRiskUsd)
+    s:=s+",\"room_rr\":"+fmt2(bestRoom)+",\"vwap\":"+fmt(vwap5)+",\"volume_confirm\":"+(volOk?"true":"false")
+    s:=s+",\"entry_max_chase_points\":2.0}"
+    s
+
+if barstate.isconfirmed and entryReady
+    alert(makePayload(), alert.freq_once_per_bar_close)
+    lastSignalSide:=bestSide
+    lastSignalStop:=bestStop
+    lastSignalBar:=bar_index
+    if showLabels
+        label.new(bar_index,bestSide=="LONG"?low:high,(bestSide=="LONG"?"BUY 1":"SELL 1")+"\n"+bestPlaybook+"\nEntry "+fmt(close)+"\nStop "+fmt(bestStop)+"\nTarget "+fmt(bestTarget)+"\nRisk $"+fmt2(bestRiskUsd),style=bestSide=="LONG"?label.style_label_up:label.style_label_down,textcolor=color.white,color=bestSide=="LONG"?color.new(color.green,0):color.new(color.red,0),size=size.small)
+
+plot(showLevels?rangeHigh5:na,"5m Range High",color=color.new(color.red,60),style=plot.style_linebr)
+plot(showLevels?rangeLow5:na,"5m Range Low",color=color.new(color.green,60),style=plot.style_linebr)
+plot(showLevels?vwap5:na,"5m VWAP",color=color.new(color.blue,15),linewidth=2)
+plot(showLevels?ema20_5:na,"5m EMA20",color=color.new(color.gray,45))
+
+var table guard=table.new(position.top_right,1,2,border_width=1)
+if barstate.islast
+    table.cell(guard,0,0,"MNQ EXEC v0.5",text_color=color.white,bgcolor=color.new(color.black,20))
+    table.cell(guard,0,1,isOneMinute?(regime+" · "+bias):"SWITCH CHART TO 1m",text_color=isOneMinute?color.white:color.yellow,bgcolor=color.new(color.black,20))
