@@ -1,0 +1,452 @@
+//@version=6
+indicator("MNQ Execution Companion v0.4", overlay=true, max_labels_count=200, max_lines_count=100)
+
+// ============================================================
+// MNQ Execution Companion v0.4
+// PURPOSE: remove the user from the candle-watching loop.
+// Run on a 1-minute MNQ chart. The script imports 5m/15m context,
+// evaluates multiple execution playbooks on each completed 1m bar,
+// and emits only qualified ENTRY_READY alerts with exact levels.
+// Manual execution only. 1 MNQ. No auto-orders.
+// ============================================================
+
+// -------------------- Inputs --------------------
+contextTf        = input.timeframe("5", "Primary context timeframe")
+macroTf          = input.timeframe("15", "Macro context timeframe")
+maxRiskDollars   = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+minRiskPoints    = input.float(3.0, "Minimum structural stop distance (pts)", minval=1.0, step=0.5)
+minScore         = input.float(7.0, "Minimum execution score", minval=5.0, maxval=10.0, step=0.25)
+breakoutRR       = input.float(1.75, "Breakout/retest minimum R:R", minval=1.0, step=0.25)
+failedBreakRR    = input.float(2.0, "Failed breakout minimum R:R", minval=1.0, step=0.25)
+trendRR          = input.float(1.75, "Trend pullback minimum R:R", minval=1.0, step=0.25)
+vwapRR           = input.float(1.75, "VWAP reclaim/reject minimum R:R", minval=1.0, step=0.25)
+earlyRR          = input.float(1.5, "Early reversal minimum R:R", minval=1.0, step=0.25)
+breakoutLifeBars = input.int(10, "Breakout retest life (1m bars)", minval=2, maxval=30)
+showLevels       = input.bool(true, "Show 5m context levels")
+showLabels       = input.bool(true, "Show qualified execution labels")
+
+// -------------------- Helpers --------------------
+fmt(float x) =>
+    na(x) ? "null" : str.tostring(x, format.mintick)
+
+fmt2(float x) =>
+    na(x) ? "null" : str.tostring(x, "#.##")
+
+yn(bool x) =>
+    x ? "true" : "false"
+
+gradeFor(float score) =>
+    score >= 9.0 ? "A+" : score >= 7.75 ? "A" : "B+"
+
+nearestAbove4(float a, float b, float c, float d, float p) =>
+    float r = na
+    if not na(a) and a > p
+        r := a
+    if not na(b) and b > p
+        r := na(r) ? b : math.min(r, b)
+    if not na(c) and c > p
+        r := na(r) ? c : math.min(r, c)
+    if not na(d) and d > p
+        r := na(r) ? d : math.min(r, d)
+    r
+
+nearestBelow4(float a, float b, float c, float d, float p) =>
+    float r = na
+    if not na(a) and a < p
+        r := a
+    if not na(b) and b < p
+        r := na(r) ? b : math.max(r, b)
+    if not na(c) and c < p
+        r := na(r) ? c : math.max(r, c)
+    if not na(d) and d < p
+        r := na(r) ? d : math.max(r, d)
+    r
+
+riskUsdLong(float entry, float stop) =>
+    entry > stop ? (entry - stop) * 2.0 : na
+
+riskUsdShort(float entry, float stop) =>
+    stop > entry ? (stop - entry) * 2.0 : na
+
+roomLong(float entry, float stop, float objective) =>
+    r = entry - stop
+    r > syminfo.mintick ? (objective - entry) / r : na
+
+roomShort(float entry, float stop, float objective) =>
+    r = stop - entry
+    r > syminfo.mintick ? (entry - objective) / r : na
+
+// -------------------- Timeframe guard --------------------
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+
+// -------------------- 1m execution measurements --------------------
+atr1 = ta.atr(14)
+ema9 = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+volMA = ta.sma(volume, 20)
+volumeConfirm = volume > volMA
+body = math.abs(close - open)
+strongBull = close > open and body >= atr1 * 0.35
+strongBear = close < open and body >= atr1 * 0.35
+
+// -------------------- 5m + 15m imported context --------------------
+c5 = request.security(syminfo.tickerid, contextTf, close)
+ema20_5 = request.security(syminfo.tickerid, contextTf, ta.ema(close, 20))
+ema50_5 = request.security(syminfo.tickerid, contextTf, ta.ema(close, 50))
+vwap5 = request.security(syminfo.tickerid, contextTf, ta.vwap(hlc3))
+atr5 = request.security(syminfo.tickerid, contextTf, ta.atr(14))
+rangeHigh5 = request.security(syminfo.tickerid, contextTf, ta.highest(high[1], 4))
+rangeLow5 = request.security(syminfo.tickerid, contextTf, ta.lowest(low[1], 4))
+swingHigh5 = request.security(syminfo.tickerid, contextTf, ta.highest(high[1], 12))
+swingLow5 = request.security(syminfo.tickerid, contextTf, ta.lowest(low[1], 12))
+
+macroHigh = request.security(syminfo.tickerid, macroTf, ta.highest(high[1], 20))
+macroLow = request.security(syminfo.tickerid, macroTf, ta.lowest(low[1], 20))
+macroEq = (macroHigh + macroLow) / 2.0
+inPremium = close > macroEq
+inDiscount = close < macroEq
+
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+trendStrength5 = atr5 > 0 ? math.abs(ema20_5 - ema50_5) / atr5 : 0.0
+trendUp5 = ema20_5 > ema50_5 and c5 > vwap5 and trendStrength5 >= 0.20
+trendDown5 = ema20_5 < ema50_5 and c5 < vwap5 and trendStrength5 >= 0.20
+extendedUp5 = c5 > vwap5 and c5 - vwap5 >= atr5 * 1.4
+extendedDown5 = c5 < vwap5 and vwap5 - c5 >= atr5 * 1.4
+regime = extendedUp5 ? "EXTENDED_UP" : extendedDown5 ? "EXTENDED_DOWN" : trendUp5 ? "TREND_UP" : trendDown5 ? "TREND_DOWN" : "RANGE"
+bias = trendUp5 ? "LONG" : trendDown5 ? "SHORT" : "NEUTRAL"
+
+// Session is a score modifier only, never a permission gate.
+nyHour = hour(time, "America/New_York")
+inAsia = not na(time(timeframe.period, "1800-2359", "America/New_York")) or not na(time(timeframe.period, "0000-0100", "America/New_York"))
+inLondon = not na(time(timeframe.period, "0200-0500", "America/New_York"))
+inNyAM = not na(time(timeframe.period, "0930-1130", "America/New_York"))
+inNyPM = not na(time(timeframe.period, "1400-1530", "America/New_York"))
+activeSession = inAsia or inLondon or inNyAM or inNyPM
+sessionLabel = inNyAM ? "NY_AM" : inNyPM ? "NY_PM" : inLondon ? "LONDON" : inAsia ? "ASIA" : "OTHER"
+sessionBonus = activeSession ? 0.25 : 0.0
+
+// -------------------- Objectives --------------------
+longObjRaw = nearestAbove4(pdh, macroHigh, swingHigh5, rangeHigh5, close)
+shortObjRaw = nearestBelow4(pdl, macroLow, swingLow5, rangeLow5, close)
+longObjective = na(longObjRaw) ? close + atr5 * 2.5 : longObjRaw
+shortObjective = na(shortObjRaw) ? close - atr5 * 2.5 : shortObjRaw
+
+// -------------------- Local structure / sweeps --------------------
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low, 2, 2)
+var float lastSwingHigh1 = na
+var float lastSwingLow1 = na
+if not na(ph)
+    lastSwingHigh1 := ph
+if not na(pl)
+    lastSwingLow1 := pl
+
+bearSweep1 = not na(lastSwingHigh1) and high > lastSwingHigh1 and close < lastSwingHigh1
+bullSweep1 = not na(lastSwingLow1) and low < lastSwingLow1 and close > lastSwingLow1
+var int bullSweepBar = na
+var int bearSweepBar = na
+var float bullSweepLow = na
+var float bearSweepHigh = na
+if bullSweep1
+    bullSweepBar := bar_index
+    bullSweepLow := low
+if bearSweep1
+    bearSweepBar := bar_index
+    bearSweepHigh := high
+bullSweepRecent = not na(bullSweepBar) and bar_index - bullSweepBar <= 5
+bearSweepRecent = not na(bearSweepBar) and bar_index - bearSweepBar <= 5
+
+// ============================================================
+// PLAYBOOK 1: 5m BREAKOUT -> 1m RETEST -> HOLD
+// ============================================================
+var bool breakLongArmed = false
+var bool breakShortArmed = false
+var float breakLongLevel = na
+var float breakShortLevel = na
+var int breakLongBar = na
+var int breakShortBar = na
+
+newBreakLong = not na(rangeHigh5) and close > rangeHigh5 and high > rangeHigh5 and close[1] <= rangeHigh5
+newBreakShort = not na(rangeLow5) and close < rangeLow5 and low < rangeLow5 and close[1] >= rangeLow5
+
+if newBreakLong
+    breakLongArmed := true
+    breakLongLevel := rangeHigh5
+    breakLongBar := bar_index
+    breakShortArmed := false
+if newBreakShort
+    breakShortArmed := true
+    breakShortLevel := rangeLow5
+    breakShortBar := bar_index
+    breakLongArmed := false
+
+if breakLongArmed and (bar_index - breakLongBar > breakoutLifeBars or close < breakLongLevel - atr1 * 0.6)
+    breakLongArmed := false
+if breakShortArmed and (bar_index - breakShortBar > breakoutLifeBars or close > breakShortLevel + atr1 * 0.6)
+    breakShortArmed := false
+
+retestTol = atr1 * 0.25
+breakLongRaw = breakLongArmed and bar_index > breakLongBar and low <= breakLongLevel + retestTol and close >= breakLongLevel and close > open and close >= ema9
+breakShortRaw = breakShortArmed and bar_index > breakShortBar and high >= breakShortLevel - retestTol and close <= breakShortLevel and close < open and close <= ema9
+breakLongStop = ta.lowest(low, 3) - syminfo.mintick * 2
+breakShortStop = ta.highest(high, 3) + syminfo.mintick * 2
+breakLongRiskPts = breakLongRaw ? close - breakLongStop : na
+breakShortRiskPts = breakShortRaw ? breakShortStop - close : na
+breakLongRisk = breakLongRaw ? riskUsdLong(close, breakLongStop) : na
+breakShortRisk = breakShortRaw ? riskUsdShort(close, breakShortStop) : na
+breakLongRoom = breakLongRaw ? roomLong(close, breakLongStop, longObjective) : na
+breakShortRoom = breakShortRaw ? roomShort(close, breakShortStop, shortObjective) : na
+breakLongScore = 7.25 + (trendUp5 ? 0.75 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (inDiscount ? 0.25 : 0.0) + sessionBonus + (not na(breakLongRoom) and breakLongRoom >= 2.25 ? 0.5 : 0.0)
+breakShortScore = 7.25 + (trendDown5 ? 0.75 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + (inPremium ? 0.25 : 0.0) + sessionBonus + (not na(breakShortRoom) and breakShortRoom >= 2.25 ? 0.5 : 0.0)
+breakLongValid = breakLongRaw and breakLongRiskPts >= minRiskPoints and breakLongRisk <= maxRiskDollars and breakLongRoom >= breakoutRR and breakLongScore >= minScore
+breakShortValid = breakShortRaw and breakShortRiskPts >= minRiskPoints and breakShortRisk <= maxRiskDollars and breakShortRoom >= breakoutRR and breakShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 2: FAILED BREAKOUT / LIQUIDITY TRAP
+// ============================================================
+failedShort0 = not na(rangeHigh5) and high > rangeHigh5 and close < rangeHigh5 and close < open and body >= atr1 * 0.25
+failedLong0 = not na(rangeLow5) and low < rangeLow5 and close > rangeLow5 and close > open and body >= atr1 * 0.25
+failedShortRaw = failedShort0 and not failedShort0[1]
+failedLongRaw = failedLong0 and not failedLong0[1]
+failedShortStop = high + syminfo.mintick * 2
+failedLongStop = low - syminfo.mintick * 2
+failedShortRiskPts = failedShortRaw ? failedShortStop - close : na
+failedLongRiskPts = failedLongRaw ? close - failedLongStop : na
+failedShortRisk = failedShortRaw ? riskUsdShort(close, failedShortStop) : na
+failedLongRisk = failedLongRaw ? riskUsdLong(close, failedLongStop) : na
+failedShortRoom = failedShortRaw ? roomShort(close, failedShortStop, shortObjective) : na
+failedLongRoom = failedLongRaw ? roomLong(close, failedLongStop, longObjective) : na
+failedShortScore = 7.5 + (inPremium ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(failedShortRoom) and failedShortRoom >= 2.5 ? 0.5 : 0.0)
+failedLongScore = 7.5 + (inDiscount ? 0.5 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(failedLongRoom) and failedLongRoom >= 2.5 ? 0.5 : 0.0)
+failedShortValid = failedShortRaw and failedShortRiskPts >= minRiskPoints and failedShortRisk <= maxRiskDollars and failedShortRoom >= failedBreakRR and failedShortScore >= minScore
+failedLongValid = failedLongRaw and failedLongRiskPts >= minRiskPoints and failedLongRisk <= maxRiskDollars and failedLongRoom >= failedBreakRR and failedLongScore >= minScore
+
+// ============================================================
+// PLAYBOOK 3: TREND PULLBACK / CONTINUATION
+// ============================================================
+trendLong0 = trendUp5 and low <= ema20 and close > ema20 and close > open and close > high[1]
+trendShort0 = trendDown5 and high >= ema20 and close < ema20 and close < open and close < low[1]
+trendLongRaw = trendLong0 and not trendLong0[1]
+trendShortRaw = trendShort0 and not trendShort0[1]
+trendLongStop = ta.lowest(low, 4) - syminfo.mintick * 2
+trendShortStop = ta.highest(high, 4) + syminfo.mintick * 2
+trendLongRiskPts = trendLongRaw ? close - trendLongStop : na
+trendShortRiskPts = trendShortRaw ? trendShortStop - close : na
+trendLongRisk = trendLongRaw ? riskUsdLong(close, trendLongStop) : na
+trendShortRisk = trendShortRaw ? riskUsdShort(close, trendShortStop) : na
+trendLongRoom = trendLongRaw ? roomLong(close, trendLongStop, longObjective) : na
+trendShortRoom = trendShortRaw ? roomShort(close, trendShortStop, shortObjective) : na
+trendLongScore = 7.5 + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(trendLongRoom) and trendLongRoom >= 2.25 ? 0.5 : 0.0)
+trendShortScore = 7.5 + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(trendShortRoom) and trendShortRoom >= 2.25 ? 0.5 : 0.0)
+trendLongValid = trendLongRaw and trendLongRiskPts >= minRiskPoints and trendLongRisk <= maxRiskDollars and trendLongRoom >= trendRR and trendLongScore >= minScore
+trendShortValid = trendShortRaw and trendShortRiskPts >= minRiskPoints and trendShortRisk <= maxRiskDollars and trendShortRoom >= trendRR and trendShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 4: VWAP RECLAIM / REJECT
+// ============================================================
+vwapLong0 = low <= vwap5 and close > vwap5 and close > open and close > high[1]
+vwapShort0 = high >= vwap5 and close < vwap5 and close < open and close < low[1]
+vwapLongRaw = vwapLong0 and not vwapLong0[1]
+vwapShortRaw = vwapShort0 and not vwapShort0[1]
+vwapLongStop = ta.lowest(low, 3) - syminfo.mintick * 2
+vwapShortStop = ta.highest(high, 3) + syminfo.mintick * 2
+vwapLongRiskPts = vwapLongRaw ? close - vwapLongStop : na
+vwapShortRiskPts = vwapShortRaw ? vwapShortStop - close : na
+vwapLongRisk = vwapLongRaw ? riskUsdLong(close, vwapLongStop) : na
+vwapShortRisk = vwapShortRaw ? riskUsdShort(close, vwapShortStop) : na
+vwapLongRoom = vwapLongRaw ? roomLong(close, vwapLongStop, longObjective) : na
+vwapShortRoom = vwapShortRaw ? roomShort(close, vwapShortStop, shortObjective) : na
+vwapLongScore = 7.25 + (trendUp5 ? 0.75 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(vwapLongRoom) and vwapLongRoom >= 2.25 ? 0.5 : 0.0)
+vwapShortScore = 7.25 + (trendDown5 ? 0.75 : 0.0) + (volumeConfirm ? 0.5 : 0.0) + sessionBonus + (not na(vwapShortRoom) and vwapShortRoom >= 2.25 ? 0.5 : 0.0)
+vwapLongValid = vwapLongRaw and vwapLongRiskPts >= minRiskPoints and vwapLongRisk <= maxRiskDollars and vwapLongRoom >= vwapRR and vwapLongScore >= minScore
+vwapShortValid = vwapShortRaw and vwapShortRiskPts >= minRiskPoints and vwapShortRisk <= maxRiskDollars and vwapShortRoom >= vwapRR and vwapShortScore >= minScore
+
+// ============================================================
+// PLAYBOOK 5: EARLY REVERSAL
+// 15m location + 1m sweep + immediate micro structure turn.
+// ============================================================
+earlyLong0 = inDiscount and bullSweepRecent and close > high[1] and strongBull
+earlyShort0 = inPremium and bearSweepRecent and close < low[1] and strongBear
+earlyLongRaw = earlyLong0 and not earlyLong0[1]
+earlyShortRaw = earlyShort0 and not earlyShort0[1]
+earlyLongStop = not na(bullSweepLow) ? bullSweepLow - syminfo.mintick * 2 : ta.lowest(low, 4) - syminfo.mintick * 2
+earlyShortStop = not na(bearSweepHigh) ? bearSweepHigh + syminfo.mintick * 2 : ta.highest(high, 4) + syminfo.mintick * 2
+earlyLongRiskPts = earlyLongRaw ? close - earlyLongStop : na
+earlyShortRiskPts = earlyShortRaw ? earlyShortStop - close : na
+earlyLongRisk = earlyLongRaw ? riskUsdLong(close, earlyLongStop) : na
+earlyShortRisk = earlyShortRaw ? riskUsdShort(close, earlyShortStop) : na
+earlyLongRoom = earlyLongRaw ? roomLong(close, earlyLongStop, longObjective) : na
+earlyShortRoom = earlyShortRaw ? roomShort(close, earlyShortStop, shortObjective) : na
+earlyLongScore = 7.25 + (volumeConfirm ? 0.5 : 0.0) + (inDiscount ? 0.5 : 0.0) + sessionBonus + (not na(earlyLongRoom) and earlyLongRoom >= 2.25 ? 0.5 : 0.0)
+earlyShortScore = 7.25 + (volumeConfirm ? 0.5 : 0.0) + (inPremium ? 0.5 : 0.0) + sessionBonus + (not na(earlyShortRoom) and earlyShortRoom >= 2.25 ? 0.5 : 0.0)
+earlyLongValid = earlyLongRaw and earlyLongRiskPts >= minRiskPoints and earlyLongRisk <= maxRiskDollars and earlyLongRoom >= earlyRR and earlyLongScore >= minScore
+earlyShortValid = earlyShortRaw and earlyShortRiskPts >= minRiskPoints and earlyShortRisk <= maxRiskDollars and earlyShortRoom >= earlyRR and earlyShortScore >= minScore
+
+// -------------------- Select strongest current execution --------------------
+float bestScore = -1.0
+string bestSide = "NONE"
+string bestPlaybook = "NONE"
+float bestStop = na
+float bestRR = na
+float bestRiskPts = na
+float bestRiskUsd = na
+float bestTargetRR = na
+float bestObjective = na
+
+if breakLongValid and breakLongScore > bestScore
+    bestScore := breakLongScore
+    bestSide := "LONG"
+    bestPlaybook := "BREAKOUT_RETEST"
+    bestStop := breakLongStop
+    bestRR := breakLongRoom
+    bestRiskPts := breakLongRiskPts
+    bestRiskUsd := breakLongRisk
+    bestTargetRR := breakoutRR
+    bestObjective := longObjective
+if breakShortValid and breakShortScore > bestScore
+    bestScore := breakShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "BREAKOUT_RETEST"
+    bestStop := breakShortStop
+    bestRR := breakShortRoom
+    bestRiskPts := breakShortRiskPts
+    bestRiskUsd := breakShortRisk
+    bestTargetRR := breakoutRR
+    bestObjective := shortObjective
+if failedLongValid and failedLongScore > bestScore
+    bestScore := failedLongScore
+    bestSide := "LONG"
+    bestPlaybook := "FAILED_BREAKOUT"
+    bestStop := failedLongStop
+    bestRR := failedLongRoom
+    bestRiskPts := failedLongRiskPts
+    bestRiskUsd := failedLongRisk
+    bestTargetRR := failedBreakRR
+    bestObjective := longObjective
+if failedShortValid and failedShortScore > bestScore
+    bestScore := failedShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "FAILED_BREAKOUT"
+    bestStop := failedShortStop
+    bestRR := failedShortRoom
+    bestRiskPts := failedShortRiskPts
+    bestRiskUsd := failedShortRisk
+    bestTargetRR := failedBreakRR
+    bestObjective := shortObjective
+if trendLongValid and trendLongScore > bestScore
+    bestScore := trendLongScore
+    bestSide := "LONG"
+    bestPlaybook := "TREND_PULLBACK"
+    bestStop := trendLongStop
+    bestRR := trendLongRoom
+    bestRiskPts := trendLongRiskPts
+    bestRiskUsd := trendLongRisk
+    bestTargetRR := trendRR
+    bestObjective := longObjective
+if trendShortValid and trendShortScore > bestScore
+    bestScore := trendShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "TREND_PULLBACK"
+    bestStop := trendShortStop
+    bestRR := trendShortRoom
+    bestRiskPts := trendShortRiskPts
+    bestRiskUsd := trendShortRisk
+    bestTargetRR := trendRR
+    bestObjective := shortObjective
+if vwapLongValid and vwapLongScore > bestScore
+    bestScore := vwapLongScore
+    bestSide := "LONG"
+    bestPlaybook := "VWAP_RECLAIM"
+    bestStop := vwapLongStop
+    bestRR := vwapLongRoom
+    bestRiskPts := vwapLongRiskPts
+    bestRiskUsd := vwapLongRisk
+    bestTargetRR := vwapRR
+    bestObjective := longObjective
+if vwapShortValid and vwapShortScore > bestScore
+    bestScore := vwapShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "VWAP_REJECT"
+    bestStop := vwapShortStop
+    bestRR := vwapShortRoom
+    bestRiskPts := vwapShortRiskPts
+    bestRiskUsd := vwapShortRisk
+    bestTargetRR := vwapRR
+    bestObjective := shortObjective
+if earlyLongValid and earlyLongScore > bestScore
+    bestScore := earlyLongScore
+    bestSide := "LONG"
+    bestPlaybook := "EARLY_REVERSAL"
+    bestStop := earlyLongStop
+    bestRR := earlyLongRoom
+    bestRiskPts := earlyLongRiskPts
+    bestRiskUsd := earlyLongRisk
+    bestTargetRR := earlyRR
+    bestObjective := longObjective
+if earlyShortValid and earlyShortScore > bestScore
+    bestScore := earlyShortScore
+    bestSide := "SHORT"
+    bestPlaybook := "EARLY_REVERSAL"
+    bestStop := earlyShortStop
+    bestRR := earlyShortRoom
+    bestRiskPts := earlyShortRiskPts
+    bestRiskUsd := earlyShortRisk
+    bestTargetRR := earlyRR
+    bestObjective := shortObjective
+
+entryReady = isOneMinute and bestSide != "NONE" and bestScore >= minScore
+bestTarget = bestSide == "LONG" ? close + bestRiskPts * bestTargetRR : bestSide == "SHORT" ? close - bestRiskPts * bestTargetRR : na
+
+// Reset breakout arm after its retest actually fires.
+if breakLongRaw
+    breakLongArmed := false
+if breakShortRaw
+    breakShortArmed := false
+
+// -------------------- JSON payload --------------------
+makePayload() =>
+    s = "{\"source\":\"exec1m\""
+    s := s + ",\"ttl_seconds\":150"
+    s := s + ",\"event\":\"ENTRY_READY\""
+    s := s + ",\"symbol\":\"" + syminfo.ticker + "\""
+    s := s + ",\"timeframe\":\"1\""
+    s := s + ",\"bar_time_ny\":\"" + str.format_time(time_close, "yyyy-MM-dd HH:mm", "America/New_York") + "\""
+    s := s + ",\"session\":\"" + sessionLabel + "\""
+    s := s + ",\"regime\":\"" + regime + "\""
+    s := s + ",\"bias\":\"" + bias + "\""
+    s := s + ",\"location\":\"" + (inPremium ? "PREMIUM" : "DISCOUNT") + "\""
+    s := s + ",\"side\":\"" + bestSide + "\""
+    s := s + ",\"playbook\":\"" + bestPlaybook + "\""
+    s := s + ",\"grade\":\"" + gradeFor(bestScore) + "\""
+    s := s + ",\"score\":" + fmt2(bestScore)
+    s := s + ",\"price\":" + fmt(close)
+    s := s + ",\"stop\":" + fmt(bestStop)
+    s := s + ",\"target\":" + fmt(bestTarget)
+    s := s + ",\"objective\":" + fmt(bestObjective)
+    s := s + ",\"risk_points\":" + fmt2(bestRiskPts)
+    s := s + ",\"risk_usd_1mnq\":" + fmt2(bestRiskUsd)
+    s := s + ",\"room_rr\":" + fmt2(bestRR)
+    s := s + ",\"vwap\":" + fmt(vwap5)
+    s := s + ",\"volume_confirm\":" + yn(volumeConfirm)
+    s := s + ",\"entry_max_chase_points\":2.0"
+    s + "}"
+
+if barstate.isconfirmed and entryReady
+    alert(makePayload(), alert.freq_once_per_bar_close)
+    if showLabels
+        label.new(bar_index, bestSide == "LONG" ? low : high, bestSide + " " + gradeFor(bestScore) + "\n" + bestPlaybook + "\nEntry " + fmt(close) + "\nStop " + fmt(bestStop) + "\nTarget " + fmt(bestTarget) + "\nRisk $" + fmt2(bestRiskUsd) + " · " + fmt2(bestRR) + "R", style=bestSide == "LONG" ? label.style_label_up : label.style_label_down, textcolor=color.white, color=bestSide == "LONG" ? color.new(color.green, 0) : color.new(color.red, 0), size=size.small)
+
+// -------------------- Visual context --------------------
+plot(showLevels ? rangeHigh5 : na, "5m Range High", color=color.new(color.red, 55), style=plot.style_linebr)
+plot(showLevels ? rangeLow5 : na, "5m Range Low", color=color.new(color.green, 55), style=plot.style_linebr)
+plot(showLevels ? vwap5 : na, "5m VWAP", color=color.new(color.blue, 15), linewidth=2)
+plot(showLevels ? ema20_5 : na, "5m EMA20", color=color.new(color.gray, 45), linewidth=1)
+plot(showLevels ? macroEq : na, "15m EQ", color=color.new(color.gray, 70), linewidth=1)
+
+// Timeframe warning: v0.4 is intentionally a 1m execution engine.
+var table guard = table.new(position.top_right, 1, 2, border_width=1)
+if barstate.islast
+    table.cell(guard, 0, 0, "MNQ EXEC v0.4", text_color=color.white, bgcolor=color.new(color.black, 20))
+    table.cell(guard, 0, 1, isOneMinute ? (regime + " · " + bias) : "SWITCH CHART TO 1m", text_color=isOneMinute ? color.white : color.yellow, bgcolor=color.new(color.black, 20))
