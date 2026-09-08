@@ -1,0 +1,149 @@
+//@version=6
+indicator("MNQ 15m ORB Companion v0.1", overlay=true, max_labels_count=200, max_lines_count=50)
+
+// Manual execution only. Designed for the 09:30-09:45 America/New_York cash-open range.
+// 1 MNQ risk guard: $2 per point, max planned risk defaults to $35.
+
+maxRiskDollars = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+requireVolume   = input.bool(true, "Require breakout volume > 20-bar average")
+minBodyAtr      = input.float(0.30, "Minimum breakout candle body (ATR multiple)", minval=0.0, step=0.05)
+showLabels      = input.bool(true, "Show BUY / SELL labels")
+showBg          = input.bool(true, "Shade opening-range build")
+
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+inOrb = not na(time(timeframe.period, "0930-0945", "America/New_York"))
+orbStart = inOrb and not inOrb[1]
+orbEnd = not inOrb and inOrb[1]
+
+var float orbHigh = na
+var float orbLow = na
+var bool orbLocked = false
+var bool longTriggered = false
+var bool shortTriggered = false
+
+if orbStart
+    orbHigh := high
+    orbLow := low
+    orbLocked := false
+    longTriggered := false
+    shortTriggered := false
+else if inOrb
+    orbHigh := math.max(na(orbHigh) ? high : orbHigh, high)
+    orbLow := math.min(na(orbLow) ? low : orbLow, low)
+
+if orbEnd and not na(orbHigh) and not na(orbLow)
+    orbLocked := true
+
+atr = ta.atr(14)
+volMA = ta.sma(volume, 20)
+volOk = volume > volMA
+body = math.abs(close-open)
+strongBull = close > open and body >= atr * minBodyAtr
+strongBear = close < open and body >= atr * minBodyAtr
+
+// Confirmed close outside the completed 15-minute range; a wick alone does not count.
+rawBuy = isOneMinute and orbLocked and not longTriggered and close > orbHigh and close[1] <= orbHigh and strongBull and (not requireVolume or volOk)
+rawSell = isOneMinute and orbLocked and not shortTriggered and close < orbLow and close[1] >= orbLow and strongBear and (not requireVolume or volOk)
+
+// Account-safe structural stop: opposite side of the breakout candle.
+buyStop = low - syminfo.mintick * 2
+sellStop = high + syminfo.mintick * 2
+buyRiskPts = close - buyStop
+sellRiskPts = sellStop - close
+buyRiskUsd = buyRiskPts * 2.0
+sellRiskUsd = sellRiskPts * 2.0
+
+buyGo = rawBuy and buyRiskPts > 0 and buyRiskUsd <= maxRiskDollars
+sellGo = rawSell and sellRiskPts > 0 and sellRiskUsd <= maxRiskDollars
+buySkipRisk = rawBuy and not buyGo
+sellSkipRisk = rawSell and not sellGo
+
+if buyGo
+    longTriggered := true
+if sellGo
+    shortTriggered := true
+
+// Track one ORB position idea at a time. No fixed take-profit: let the winner run.
+var string activeSide = "NONE"
+var float activeEntry = na
+var float activeStop = na
+var float bestPrice = na
+
+if buyGo and activeSide == "NONE"
+    activeSide := "BUY"
+    activeEntry := close
+    activeStop := buyStop
+    bestPrice := high
+
+if sellGo and activeSide == "NONE"
+    activeSide := "SELL"
+    activeEntry := close
+    activeStop := sellStop
+    bestPrice := low
+
+if activeSide == "BUY"
+    bestPrice := math.max(bestPrice, high)
+if activeSide == "SELL"
+    bestPrice := math.min(bestPrice, low)
+
+// Main thesis invalidation: breakout fails and candle closes back inside the ORB.
+exitBuyFail = activeSide == "BUY" and close < orbHigh
+exitSellFail = activeSide == "SELL" and close > orbLow
+exitBuyStop = activeSide == "BUY" and low <= activeStop
+exitSellStop = activeSide == "SELL" and high >= activeStop
+
+exitBuy = exitBuyFail or exitBuyStop
+exitSell = exitSellFail or exitSellStop
+
+if exitBuy or exitSell
+    activeSide := "NONE"
+    activeEntry := na
+    activeStop := na
+    bestPrice := na
+
+plot(orbHigh, "ORB High", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+plot(orbLow, "ORB Low", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+bgcolor(showBg and inOrb ? color.new(color.blue, 90) : na)
+
+if showLabels and buyGo
+    label.new(bar_index, low, "BUY 1 ORB\nEntry " + str.tostring(close, format.mintick) + "\nStop " + str.tostring(buyStop, format.mintick) + "\nRisk $" + str.tostring(buyRiskUsd, "#.##") + "\nRUNNER: no fixed TP", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+if showLabels and sellGo
+    label.new(bar_index, high, "SELL 1 ORB\nEntry " + str.tostring(close, format.mintick) + "\nStop " + str.tostring(sellStop, format.mintick) + "\nRisk $" + str.tostring(sellRiskUsd, "#.##") + "\nRUNNER: no fixed TP", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+if showLabels and buySkipRisk
+    label.new(bar_index, high, "ORB BUY SKIP\nRisk $" + str.tostring(buyRiskUsd, "#.##") + " > cap", style=label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and sellSkipRisk
+    label.new(bar_index, low, "ORB SELL SKIP\nRisk $" + str.tostring(sellRiskUsd, "#.##") + " > cap", style=label.style_label_up, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and exitBuy
+    label.new(bar_index, high, "EXIT ORB BUY", style=label.style_label_down, textcolor=color.white, color=color.new(color.gray, 0))
+if showLabels and exitSell
+    label.new(bar_index, low, "EXIT ORB SELL", style=label.style_label_up, textcolor=color.white, color=color.new(color.gray, 0))
+
+makePayload(string eventName, string side, float entry, float stop, float riskUsd) =>
+    "{\"source\":\"orb15m_v01\",\"event\":\"" + eventName + "\",\"side\":\"" + side + "\",\"playbook\":\"ORB_15M\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + timeframe.period + "\",\"price\":" + str.tostring(close, format.mintick) + ",\"entry\":" + str.tostring(entry, format.mintick) + ",\"stop\":" + str.tostring(stop, format.mintick) + ",\"risk_usd_1mnq\":" + str.tostring(riskUsd, "#.##") + ",\"orb_high\":" + str.tostring(orbHigh, format.mintick) + ",\"orb_low\":" + str.tostring(orbLow, format.mintick) + ",\"ttl_seconds\":120}"
+
+if barstate.isconfirmed
+    if buyGo
+        alert(makePayload("ENTRY_READY", "LONG", close, buyStop, buyRiskUsd), alert.freq_once_per_bar_close)
+    if sellGo
+        alert(makePayload("ENTRY_READY", "SHORT", close, sellStop, sellRiskUsd), alert.freq_once_per_bar_close)
+    if buySkipRisk
+        alert(makePayload("SKIP_RISK", "LONG", close, buyStop, buyRiskUsd), alert.freq_once_per_bar_close)
+    if sellSkipRisk
+        alert(makePayload("SKIP_RISK", "SHORT", close, sellStop, sellRiskUsd), alert.freq_once_per_bar_close)
+    if exitBuy
+        alert(makePayload("EXIT", "LONG", activeEntry, activeStop, 0.0), alert.freq_once_per_bar_close)
+    if exitSell
+        alert(makePayload("EXIT", "SHORT", activeEntry, activeStop, 0.0), alert.freq_once_per_bar_close)
+
+var table status = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(status, 0, 0, "15m ORB")
+    table.cell(status, 1, 0, inOrb ? "BUILDING" : orbLocked ? "LOCKED" : "WAIT")
+    table.cell(status, 0, 1, "HIGH")
+    table.cell(status, 1, 1, na(orbHigh) ? "—" : str.tostring(orbHigh, format.mintick))
+    table.cell(status, 0, 2, "LOW")
+    table.cell(status, 1, 2, na(orbLow) ? "—" : str.tostring(orbLow, format.mintick))
+    table.cell(status, 0, 3, "POSITION")
+    table.cell(status, 1, 3, activeSide)
+    table.cell(status, 0, 4, "RULE")
+    table.cell(status, 1, 4, "CLOSE OUTSIDE")
