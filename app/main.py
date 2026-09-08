@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 
-app = FastAPI(title="MNQ Opportunity Engine", version="0.3.0")
+app = FastAPI(title="MNQ Opportunity Engine", version="0.3.1")
 
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = BASE / "data"
@@ -78,9 +78,21 @@ def latest_matching(predicate, limit=1000):
     return None
 
 
+def row_age_minutes(row) -> float:
+    if not row or not row.get("received_at"):
+        return float("inf")
+    try:
+        received = datetime.fromisoformat(str(row["received_at"]).replace("Z", "+00:00"))
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - received.astimezone(timezone.utc)).total_seconds() / 60.0)
+    except Exception:
+        return float("inf")
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.3.0", "storage": str(DATA)}
+    return {"ok": True, "version": "0.3.1", "storage": str(DATA)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -101,11 +113,20 @@ def get_latest_state():
 
 @app.get("/api/latest-action")
 def get_latest_action():
+    """Return only a genuinely current action.
+
+    Historical ENTRY_READY / SETUP_ARMED events remain in event history, but once
+    they are older than 10 minutes they must never populate the dashboard's
+    'Best Current Decision' or 'Best Opportunity' cards.
+    """
     actionable = {"ENTRY_READY", "SETUP_ARMED", "SKIP_RISK", "SKIP_RR"}
-    return latest_matching(lambda p: str(p.get("event") or "").upper() in actionable, 1500)
+    row = latest_matching(lambda p: str(p.get("event") or "").upper() in actionable, 1500)
+    if row is None or row_age_minutes(row) > 10.0:
+        return None
+    return row
 
 
-# Backward-compatible alias. This intentionally returns actions, not STATE heartbeats.
+# Backward-compatible alias. This intentionally returns fresh actions, not STATE heartbeats.
 @app.get("/api/latest")
 def get_latest():
     return get_latest_action()
