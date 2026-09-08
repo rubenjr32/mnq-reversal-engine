@@ -1,0 +1,296 @@
+//@version=6
+indicator("MNQ Max-Style ORB Replica v0.2", overlay=true, max_labels_count=300, max_lines_count=100)
+
+// Research/manual-execution companion for MNQ/NQ.
+// Core rules implemented from Max Options Trading's public ORB material:
+// - First 15m NY cash-open candle (09:30-09:45 ET), INCLUDING wicks.
+// - No ORB trade before range is complete.
+// - Lower-timeframe futures execution after the ORB is established.
+// - Breakout requires a candle CLOSE outside the ORB; wick-only breaks do not count.
+// - Re-entry into the ORB invalidates a breakout thesis.
+// - Track trend structure: a new lower low invalidates a long; a new higher high invalidates a short.
+// - 6-7 completed 15m candles without a true break = CHOP / possible delayed larger move warning.
+// User-requested cross-market confirmation: S&P/ES alignment is shown and can be required.
+// Manual execution only. 1 MNQ = $2 per Nasdaq point.
+
+// ---------- Inputs ----------
+maxRiskDollars  = input.float(35.0, "Max planned risk · 1 MNQ ($)", minval=5.0, step=5.0)
+requireVolume   = input.bool(true, "Require breakout volume > 20-bar average")
+minBodyAtr      = input.float(0.25, "Minimum breakout body (ATR multiple)", minval=0.0, step=0.05)
+requireES       = input.bool(true, "Require S&P / ES confirmation")
+esSymbol        = input.symbol("CME_MINI:ES1!", "S&P confirmation symbol")
+showMidline     = input.bool(true, "Show ORB midpoint")
+showLabels      = input.bool(true, "Show BUY / SELL / EXIT labels")
+showBg          = input.bool(true, "Shade 09:30-09:45 ET range build")
+retestMode      = input.bool(true, "Allow break-and-retest entry after initial break")
+structureLen    = input.int(2, "Structure pivot strength", minval=1, maxval=5)
+
+// ---------- Chart / session ----------
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+inOrb = not na(time(timeframe.period, "0930-0945", "America/New_York"))
+orbStart = inOrb and not inOrb[1]
+orbEnd = not inOrb and inOrb[1]
+
+var float orbHigh = na
+var float orbLow = na
+var bool orbLocked = false
+var bool initialLongBreakSeen = false
+var bool initialShortBreakSeen = false
+var bool longTriggered = false
+var bool shortTriggered = false
+
+if orbStart
+    orbHigh := high
+    orbLow := low
+    orbLocked := false
+    initialLongBreakSeen := false
+    initialShortBreakSeen := false
+    longTriggered := false
+    shortTriggered := false
+else if inOrb
+    orbHigh := math.max(na(orbHigh) ? high : orbHigh, high)
+    orbLow := math.min(na(orbLow) ? low : orbLow, low)
+
+if orbEnd and not na(orbHigh) and not na(orbLow)
+    orbLocked := true
+
+orbMid = (orbHigh + orbLow) / 2.0
+orbWidth = orbHigh - orbLow
+
+// ---------- 15m state / Max chop rule ----------
+f_ny_orb_high() =>
+    isOpenBar = hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30
+    ta.valuewhen(isOpenBar, high, 0)
+
+f_ny_orb_low() =>
+    isOpenBar = hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30
+    ta.valuewhen(isOpenBar, low, 0)
+
+f_inside_count() =>
+    isOpenBar = hour(time, "America/New_York") == 9 and minute(time, "America/New_York") == 30
+    h = ta.valuewhen(isOpenBar, high, 0)
+    l = ta.valuewhen(isOpenBar, low, 0)
+    afterOpen = time > ta.valuewhen(isOpenBar, time, 0)
+    inside = afterOpen and high <= h and low >= l
+    var int c = 0
+    if isOpenBar
+        c := 0
+    else if inside
+        c += 1
+    else if afterOpen
+        c := 0
+    c
+
+inside15Count = request.security(syminfo.tickerid, "15", f_inside_count(), barmerge.gaps_off, barmerge.lookahead_off)
+chopWarning = orbLocked and inside15Count >= 6
+
+// ---------- S&P / ES confirmation ----------
+esOrbHigh = request.security(esSymbol, "15", f_ny_orb_high(), barmerge.gaps_off, barmerge.lookahead_off)
+esOrbLow  = request.security(esSymbol, "15", f_ny_orb_low(),  barmerge.gaps_off, barmerge.lookahead_off)
+esClose   = request.security(esSymbol, "1", close, barmerge.gaps_off, barmerge.lookahead_off)
+esOpen    = request.security(esSymbol, "1", open,  barmerge.gaps_off, barmerge.lookahead_off)
+esLongConfirm = not na(esOrbHigh) and esClose > esOrbHigh and esClose >= esOpen
+esShortConfirm = not na(esOrbLow) and esClose < esOrbLow and esClose <= esOpen
+esNeutral = not esLongConfirm and not esShortConfirm
+
+// ---------- Breakout quality ----------
+atr = ta.atr(14)
+volMA = ta.sma(volume, 20)
+volOk = volume > volMA
+body = math.abs(close - open)
+strongBull = close > open and body >= atr * minBodyAtr
+strongBear = close < open and body >= atr * minBodyAtr
+
+// A wick outside does NOT count. The close must be outside.
+closeBreakLong = isOneMinute and orbLocked and close > orbHigh and close[1] <= orbHigh
+closeBreakShort = isOneMinute and orbLocked and close < orbLow and close[1] >= orbLow
+
+if closeBreakLong
+    initialLongBreakSeen := true
+if closeBreakShort
+    initialShortBreakSeen := true
+
+// Break-and-retest: old ORB resistance becomes support / support becomes resistance.
+longRetest = isOneMinute and orbLocked and retestMode and initialLongBreakSeen and low <= orbHigh and close > orbHigh and close > open
+shortRetest = isOneMinute and orbLocked and retestMode and initialShortBreakSeen and high >= orbLow and close < orbLow and close < open
+
+rawLong = (closeBreakLong or longRetest) and strongBull and (not requireVolume or volOk)
+rawShort = (closeBreakShort or shortRetest) and strongBear and (not requireVolume or volOk)
+
+esOkLong = not requireES or esLongConfirm
+esOkShort = not requireES or esShortConfirm
+
+confirmedLong = rawLong and esOkLong
+confirmedShort = rawShort and esOkShort
+
+// ---------- Risk model ----------
+// Max publicly describes stops just inside the ORB or below/above the breakout candle.
+// Use the tighter of those two locations, then enforce Ruben's <= $35 1-MNQ cap.
+insideLongStop = orbHigh - syminfo.mintick * 2
+insideShortStop = orbLow + syminfo.mintick * 2
+candleLongStop = low - syminfo.mintick * 2
+candleShortStop = high + syminfo.mintick * 2
+longStop = math.max(insideLongStop, candleLongStop)
+shortStop = math.min(insideShortStop, candleShortStop)
+longRiskPts = close - longStop
+shortRiskPts = shortStop - close
+longRiskUsd = longRiskPts * 2.0
+shortRiskUsd = shortRiskPts * 2.0
+
+longGo = confirmedLong and not longTriggered and longRiskPts > 0 and longRiskUsd <= maxRiskDollars
+shortGo = confirmedShort and not shortTriggered and shortRiskPts > 0 and shortRiskUsd <= maxRiskDollars
+longSkipRisk = confirmedLong and not longGo and longRiskPts > 0 and longRiskUsd > maxRiskDollars
+shortSkipRisk = confirmedShort and not shortGo and shortRiskPts > 0 and shortRiskUsd > maxRiskDollars
+longWaitES = rawLong and requireES and not esLongConfirm
+shortWaitES = rawShort and requireES and not esShortConfirm
+
+if longGo
+    longTriggered := true
+if shortGo
+    shortTriggered := true
+
+// ---------- Structure / active trade management ----------
+pl = ta.pivotlow(low, structureLen, structureLen)
+ph = ta.pivothigh(high, structureLen, structureLen)
+var float lastPivotLow = na
+var float lastPivotHigh = na
+if not na(pl)
+    lastPivotLow := pl
+if not na(ph)
+    lastPivotHigh := ph
+
+var string activeSide = "NONE"
+var float activeEntry = na
+var float activeStop = na
+var float bestPrice = na
+var float worstPrice = na
+var float activeRiskUsd = na
+
+if longGo and activeSide == "NONE"
+    activeSide := "BUY"
+    activeEntry := close
+    activeStop := longStop
+    activeRiskUsd := longRiskUsd
+    bestPrice := high
+    worstPrice := low
+
+if shortGo and activeSide == "NONE"
+    activeSide := "SELL"
+    activeEntry := close
+    activeStop := shortStop
+    activeRiskUsd := shortRiskUsd
+    bestPrice := low
+    worstPrice := high
+
+if activeSide == "BUY"
+    bestPrice := math.max(bestPrice, high)
+    worstPrice := math.min(worstPrice, low)
+if activeSide == "SELL"
+    bestPrice := math.min(bestPrice, low)
+    worstPrice := math.max(worstPrice, high)
+
+// Max-style invalidation: back inside ORB OR structure flips against the position.
+exitLongReentry = activeSide == "BUY" and close < orbHigh
+exitShortReentry = activeSide == "SELL" and close > orbLow
+exitLongStop = activeSide == "BUY" and low <= activeStop
+exitShortStop = activeSide == "SELL" and high >= activeStop
+exitLongStructure = activeSide == "BUY" and not na(lastPivotLow) and close < lastPivotLow
+exitShortStructure = activeSide == "SELL" and not na(lastPivotHigh) and close > lastPivotHigh
+
+exitLong = exitLongReentry or exitLongStop or exitLongStructure
+exitShort = exitShortReentry or exitShortStop or exitShortStructure
+
+longExitPrice = exitLongStop ? activeStop : close
+shortExitPrice = exitShortStop ? activeStop : close
+longPnl = activeSide == "BUY" ? (longExitPrice - activeEntry) * 2.0 : na
+shortPnl = activeSide == "SELL" ? (activeEntry - shortExitPrice) * 2.0 : na
+longMfe = activeSide == "BUY" ? (bestPrice - activeEntry) * 2.0 : na
+longMae = activeSide == "BUY" ? (activeEntry - worstPrice) * 2.0 : na
+shortMfe = activeSide == "SELL" ? (activeEntry - bestPrice) * 2.0 : na
+shortMae = activeSide == "SELL" ? (worstPrice - activeEntry) * 2.0 : na
+
+longExitReason = exitLongStop ? "STOP" : exitLongReentry ? "ORB_REENTRY" : "STRUCTURE_BREAK"
+shortExitReason = exitShortStop ? "STOP" : exitShortReentry ? "ORB_REENTRY" : "STRUCTURE_BREAK"
+
+// ---------- Plots ----------
+plot(orbHigh, "ORB High", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+plot(orbLow, "ORB Low", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showMidline ? orbMid : na, "ORB Mid", color=color.new(color.gray, 50), linewidth=1, style=plot.style_linebr)
+bgcolor(showBg and inOrb ? color.new(color.blue, 90) : na)
+
+if showLabels and longGo
+    label.new(bar_index, low, "BUY 1 · MAX ORB\nEntry " + str.tostring(close, format.mintick) + "\nStop " + str.tostring(longStop, format.mintick) + "\nRisk $" + str.tostring(longRiskUsd, "#.##") + "\nES CONFIRMED", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+if showLabels and shortGo
+    label.new(bar_index, high, "SELL 1 · MAX ORB\nEntry " + str.tostring(close, format.mintick) + "\nStop " + str.tostring(shortStop, format.mintick) + "\nRisk $" + str.tostring(shortRiskUsd, "#.##") + "\nES CONFIRMED", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+if showLabels and longWaitES
+    label.new(bar_index, high, "WAIT · NQ BUY BREAK\nES NOT CONFIRMED", style=label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and shortWaitES
+    label.new(bar_index, low, "WAIT · NQ SELL BREAK\nES NOT CONFIRMED", style=label.style_label_up, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and longSkipRisk
+    label.new(bar_index, high, "SKIP BUY · RISK $" + str.tostring(longRiskUsd, "#.##"), style=label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and shortSkipRisk
+    label.new(bar_index, low, "SKIP SELL · RISK $" + str.tostring(shortRiskUsd, "#.##"), style=label.style_label_up, textcolor=color.white, color=color.new(color.orange, 0))
+if showLabels and exitLong
+    label.new(bar_index, high, "EXIT BUY · " + longExitReason + "\nP/L $" + str.tostring(longPnl, "#.##") + "\nMFE $" + str.tostring(longMfe, "#.##"), style=label.style_label_down, textcolor=color.white, color=color.new(color.gray, 0))
+if showLabels and exitShort
+    label.new(bar_index, low, "EXIT SELL · " + shortExitReason + "\nP/L $" + str.tostring(shortPnl, "#.##") + "\nMFE $" + str.tostring(shortMfe, "#.##"), style=label.style_label_up, textcolor=color.white, color=color.new(color.gray, 0))
+
+// ---------- Webhook payload ----------
+makeEntryPayload(string eventName, string side, float entry, float stop, float riskUsd, string esState) =>
+    "{\"source\":\"max_orb_v02\",\"event\":\"" + eventName + "\",\"side\":\"" + side + "\",\"playbook\":\"MAX_ORB_15M_ES\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + timeframe.period + "\",\"price\":" + str.tostring(close, format.mintick) + ",\"entry\":" + str.tostring(entry, format.mintick) + ",\"stop\":" + str.tostring(stop, format.mintick) + ",\"risk_usd_1mnq\":" + str.tostring(riskUsd, "#.##") + ",\"orb_high\":" + str.tostring(orbHigh, format.mintick) + ",\"orb_low\":" + str.tostring(orbLow, format.mintick) + ",\"es_symbol\":\"" + esSymbol + "\",\"es_state\":\"" + esState + "\",\"es_price\":" + str.tostring(esClose, format.mintick) + ",\"es_orb_high\":" + str.tostring(esOrbHigh, format.mintick) + ",\"es_orb_low\":" + str.tostring(esOrbLow, format.mintick) + ",\"inside15_count\":" + str.tostring(inside15Count) + ",\"ttl_seconds\":120}"
+
+makeExitPayload(string side, float entry, float exitPx, float pnl, float mfe, float mae, string reason) =>
+    "{\"source\":\"max_orb_v02\",\"event\":\"ORB_RESULT\",\"side\":\"" + side + "\",\"playbook\":\"MAX_ORB_15M_ES\",\"symbol\":\"" + syminfo.ticker + "\",\"entry\":" + str.tostring(entry, format.mintick) + ",\"exit_price\":" + str.tostring(exitPx, format.mintick) + ",\"pnl_usd_1mnq\":" + str.tostring(pnl, "#.##") + ",\"mfe_usd_1mnq\":" + str.tostring(mfe, "#.##") + ",\"mae_usd_1mnq\":" + str.tostring(mae, "#.##") + ",\"exit_reason\":\"" + reason + "\"}"
+
+if barstate.isconfirmed
+    if longGo
+        alert(makeEntryPayload("ENTRY_READY", "LONG", close, longStop, longRiskUsd, "LONG"), alert.freq_once_per_bar_close)
+    if shortGo
+        alert(makeEntryPayload("ENTRY_READY", "SHORT", close, shortStop, shortRiskUsd, "SHORT"), alert.freq_once_per_bar_close)
+    if longWaitES
+        alert(makeEntryPayload("WAIT_ES", "LONG", close, longStop, longRiskUsd, esShortConfirm ? "OPPOSED" : "NEUTRAL"), alert.freq_once_per_bar_close)
+    if shortWaitES
+        alert(makeEntryPayload("WAIT_ES", "SHORT", close, shortStop, shortRiskUsd, esLongConfirm ? "OPPOSED" : "NEUTRAL"), alert.freq_once_per_bar_close)
+    if longSkipRisk
+        alert(makeEntryPayload("SKIP_RISK", "LONG", close, longStop, longRiskUsd, esLongConfirm ? "LONG" : "NEUTRAL"), alert.freq_once_per_bar_close)
+    if shortSkipRisk
+        alert(makeEntryPayload("SKIP_RISK", "SHORT", close, shortStop, shortRiskUsd, esShortConfirm ? "SHORT" : "NEUTRAL"), alert.freq_once_per_bar_close)
+    if exitLong
+        alert(makeExitPayload("LONG", activeEntry, longExitPrice, longPnl, longMfe, longMae, longExitReason), alert.freq_once_per_bar_close)
+    if exitShort
+        alert(makeExitPayload("SHORT", activeEntry, shortExitPrice, shortPnl, shortMfe, shortMae, shortExitReason), alert.freq_once_per_bar_close)
+
+// Reset active state AFTER the exit payload has captured the trade values.
+if exitLong or exitShort
+    activeSide := "NONE"
+    activeEntry := na
+    activeStop := na
+    activeRiskUsd := na
+    bestPrice := na
+    worstPrice := na
+
+// ---------- Status panel ----------
+var table status = table.new(position.top_right, 2, 9, border_width=1)
+if barstate.islast
+    orbState = inOrb ? "BUILDING" : orbLocked ? "LOCKED" : "WAIT"
+    esState = esLongConfirm ? "BULL CONFIRM" : esShortConfirm ? "BEAR CONFIRM" : "NEUTRAL"
+    dayState = chopWarning ? "CHOP / LATE MOVE" : "NORMAL"
+    action = activeSide != "NONE" ? activeSide : longWaitES ? "WAIT ES" : shortWaitES ? "WAIT ES" : "WAIT"
+    table.cell(status, 0, 0, "MAX ORB v0.2")
+    table.cell(status, 1, 0, orbState)
+    table.cell(status, 0, 1, "ORB HIGH")
+    table.cell(status, 1, 1, na(orbHigh) ? "—" : str.tostring(orbHigh, format.mintick))
+    table.cell(status, 0, 2, "ORB LOW")
+    table.cell(status, 1, 2, na(orbLow) ? "—" : str.tostring(orbLow, format.mintick))
+    table.cell(status, 0, 3, "MID")
+    table.cell(status, 1, 3, na(orbMid) ? "—" : str.tostring(orbMid, format.mintick))
+    table.cell(status, 0, 4, "ES CONFIRM")
+    table.cell(status, 1, 4, esState)
+    table.cell(status, 0, 5, "15m INSIDE")
+    table.cell(status, 1, 5, str.tostring(inside15Count))
+    table.cell(status, 0, 6, "DAY READ")
+    table.cell(status, 1, 6, dayState)
+    table.cell(status, 0, 7, "POSITION")
+    table.cell(status, 1, 7, activeSide)
+    table.cell(status, 0, 8, "ACTION")
+    table.cell(status, 1, 8, action)
